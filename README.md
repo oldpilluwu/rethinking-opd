@@ -199,10 +199,10 @@ If you find this work helpful, please cite us:
 
 ## ⭐Star History
 
-<a href="https://www.star-history.com/#thunlp/OPD&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=thunlp/OPD&type=date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=thunlp/OPD&type=date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=thunlp/OPD&type=date" />
-  </picture>
+<a href="https://www.star-history.com/?type=date&repos=thunlp%2FOPD">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=thunlp/OPD&type=date&theme=dark&legend=top-left&sealed_token=XcB5mCFWUPELJrD_hpaRBLFJ1NOHz17YTfmnt4nNVgRAKcxkKynQDneLnha7Mk6m6h6MRK-ddg_RSotwoZ_ei4KWtH3a6sZNHVpjLkAJasyHfJ5duoJxTU_mxC2hyqXibK-vTn1rsjMA-RYqQ-FaSYXGAwgy1dqG7Oy_TzLICFqD-xv7KrspBLlycy7L" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=thunlp/OPD&type=date&legend=top-left&sealed_token=XcB5mCFWUPELJrD_hpaRBLFJ1NOHz17YTfmnt4nNVgRAKcxkKynQDneLnha7Mk6m6h6MRK-ddg_RSotwoZ_ei4KWtH3a6sZNHVpjLkAJasyHfJ5duoJxTU_mxC2hyqXibK-vTn1rsjMA-RYqQ-FaSYXGAwgy1dqG7Oy_TzLICFqD-xv7KrspBLlycy7L" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=thunlp/OPD&type=date&legend=top-left&sealed_token=XcB5mCFWUPELJrD_hpaRBLFJ1NOHz17YTfmnt4nNVgRAKcxkKynQDneLnha7Mk6m6h6MRK-ddg_RSotwoZ_ei4KWtH3a6sZNHVpjLkAJasyHfJ5duoJxTU_mxC2hyqXibK-vTn1rsjMA-RYqQ-FaSYXGAwgy1dqG7Oy_TzLICFqD-xv7KrspBLlycy7L" />
+ </picture>
 </a>
