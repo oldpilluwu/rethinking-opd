@@ -556,7 +556,14 @@ def cmd_bench(args):
     targets = [(args.sft, "sft", -1)]
     if args.teacher:
         targets.append((args.teacher, "teacher", -2))
-    targets += [(d, f"step_{step_of(d)}", step_of(d)) for d in list_steps(args.hf_dir)]
+    ckpts = list_steps(args.hf_dir)
+    if args.steps:
+        want = {int(x) for x in args.steps.split(",")}
+        ckpts = [d for d in ckpts if step_of(d) in want]
+        missing = want - {step_of(d) for d in ckpts}
+        if missing:
+            print(f"  requested steps not found in {args.hf_dir}: {sorted(missing)}")
+    targets += [(d, f"step_{step_of(d)}", step_of(d)) for d in ckpts]
 
     baseline_correct = {}
     all_rows = []
@@ -737,6 +744,12 @@ def main():
         default="datasets/test_data/AIME24/test.parquet,"
         "datasets/test_data/AIME25/test.parquet,"
         "datasets/test_data/AMC23/test.parquet",
+    )
+    bn.add_argument(
+        "--steps",
+        default=None,
+        help="comma-separated checkpoint steps to evaluate, e.g. 10,25,50. Default: all. "
+        "The SFT and teacher baselines always run regardless.",
     )
     bn.add_argument("--k", type=int, default=16, help="samples per problem (paper: avg@16)")
     bn.add_argument("--max-tokens", type=int, default=0, help="0 = use the preset's value")
