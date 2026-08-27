@@ -43,6 +43,11 @@ import pyarrow.parquet as pq
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "verl"))
 
+# FlashInfer JIT-compiles its sampling kernels and needs nvcc (the CUDA toolkit, not
+# just the driver). Fall back to vLLM's native top-k/top-p sampler when nvcc is absent.
+# Set VLLM_USE_FLASHINFER_SAMPLER=1 explicitly to override.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
 THINK_OPEN = "<think>"
 
 

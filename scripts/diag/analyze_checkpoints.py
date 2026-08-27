@@ -42,6 +42,10 @@ import re
 
 import torch
 
+# FlashInfer JIT-compiles its sampling kernels and needs nvcc (the CUDA toolkit, not
+# just the driver). Fall back to vLLM's native top-k/top-p sampler when nvcc is absent.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
 TOP_K = 16
 LOGP_FLOOR = -30.0
 

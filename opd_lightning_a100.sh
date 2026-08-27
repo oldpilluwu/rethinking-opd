@@ -25,6 +25,9 @@ export TORCH_NCCL_BLOCKING_WAIT=1
 export NCCL_TIMEOUT=7200
 export NCCL_DEBUG=WARN
 export TOKENIZERS_PARALLELISM=true
+# FlashInfer JIT-compiles sampling kernels and needs nvcc (CUDA toolkit, not just the
+# driver). vLLM's native sampler is equivalent and needs no compiler.
+export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
 export HYDRA_FULL_ERROR=1
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 # NOTE: CUDA_LAUNCH_BLOCKING is deliberately NOT set. The upstream script sets it
