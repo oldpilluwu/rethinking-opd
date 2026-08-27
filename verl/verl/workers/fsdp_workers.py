@@ -1792,6 +1792,15 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
+        # Teacher parameter placement. This used to be hard-coded to CPUOffload, which
+        # streams the whole teacher across PCIe on every micro-batch -- measured at
+        # ~1k tok/s for a 4B forward on an A100, against ~10k tok/s resident, and it
+        # dominated the step (58% of wall time in a 1-GPU run). Now honours
+        # reward_model.model.fsdp_config.param_offload, which was previously dead config.
+        # Keep True on a memory-constrained GPU; set False when the teacher fits.
+        _rm_offload = self.config.model.fsdp_config.get("param_offload", True)
+        print(f"RewardModel(teacher) param_offload={_rm_offload}")
+
         if config.strategy == "fsdp":
             reward_module = FSDP(
                 reward_module,
@@ -1801,13 +1810,13 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 device_id=get_device_id(),
                 sharding_strategy=sharding_strategy,  # zero3
                 sync_module_states=True,
-                cpu_offload=CPUOffload(offload_params=True),
+                cpu_offload=CPUOffload(offload_params=True) if _rm_offload else None,
                 forward_prefetch=self.config.model.fsdp_config.forward_prefetch,
                 device_mesh=self.device_mesh,
             )
         elif config.strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
-            cpu_offload = CPUOffloadPolicy(pin_memory=True)
+            cpu_offload = CPUOffloadPolicy(pin_memory=True) if _rm_offload else None
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
                 "offload_policy": cpu_offload,

@@ -108,9 +108,14 @@ export N_GPUS=1
 export PARALLEL_SIZE=1
 export ACTOR_MAX_TOKEN_LEN=16384           # [48GB] 8192
 export TEACHER_MAX_TOKEN_LEN=16384         # [48GB] 8192  (see critic.* note below)
-export GPU_MEM_UTIL=0.35                   # [48GB] 0.5
+export GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.25}  # [48GB] 0.5 (lowered to make room for a resident teacher)
 export PARAM_OFFLOAD=False                 # [48GB] True
 export OPTIMIZER_OFFLOAD=False             # [48GB] True if OOM
+# Teacher parameter placement. Offloading streams 8GB over PCIe every micro-batch and
+# made teacher scoring 58% of step time in the smoke run (~1k tok/s for a 4B forward).
+# Keeping it resident costs ~8GB and should be several times faster.
+# [48GB] set to True -- the teacher will not fit there alongside the fp32 actor.
+export TEACHER_PARAM_OFFLOAD=${TEACHER_PARAM_OFFLOAD:-False}
 
 # --------------------------------------------------------------- checkpoints
 export SAVE_STEPS="[1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]"
@@ -122,17 +127,21 @@ export OPTIMIZER_SAVE_STEPS="[50,150]"     # only these two are resumable
 # never collide with a real run. Everything else -- the objective, the reward path,
 # the diagnostics -- is identical, which is the point: a shape mismatch in the
 # diagnostics is fatal on the first batch, so this is where it surfaces.
+# Every value here can be overridden from the environment, so the same mode doubles as
+# a calibration run at the real response length:
+#     SMOKE=1 SMOKE_RESP=4096 SMOKE_BATCH=16 bash opd_lightning_a100.sh
+# which measures the true truncation rate and per-step timing without committing to 150.
 if [ "${SMOKE:-0}" = "1" ]; then
-    export MAX_RESP_LENGTH=1024
+    export MAX_RESP_LENGTH=${SMOKE_RESP:-1024}
     export MAX_MODEL_LEN=$(( MAX_PROMPT_LENGTH + MAX_RESP_LENGTH + 1 ))
-    export TRAIN_BATCH_SIZE=8
-    export MINI_BATCH_SIZE=8
-    export TOTAL_STEPS=3
-    export SAVE_STEPS="[3]"
-    export OPTIMIZER_SAVE_STEPS="[3]"
-    export ACTOR_MAX_TOKEN_LEN=4096
-    export TEACHER_MAX_TOKEN_LEN=4096
-    echo "=== SMOKE MODE: 3 steps, batch 8, 1024 tokens ==="
+    export TRAIN_BATCH_SIZE=${SMOKE_BATCH:-8}
+    export MINI_BATCH_SIZE=$TRAIN_BATCH_SIZE
+    export TOTAL_STEPS=${SMOKE_STEPS:-3}
+    export SAVE_STEPS="[$TOTAL_STEPS]"
+    export OPTIMIZER_SAVE_STEPS="[$TOTAL_STEPS]"
+    export ACTOR_MAX_TOKEN_LEN=${SMOKE_TOKEN_LEN:-4096}
+    export TEACHER_MAX_TOKEN_LEN=$ACTOR_MAX_TOKEN_LEN
+    echo "=== SMOKE MODE: $TOTAL_STEPS steps, batch $TRAIN_BATCH_SIZE, $MAX_RESP_LENGTH tokens ==="
 fi
 
 export PROJECT_PATH=checkpoint
