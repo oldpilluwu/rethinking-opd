@@ -106,8 +106,27 @@ export OPTIMIZER_OFFLOAD=False             # [48GB] True if OOM
 export SAVE_STEPS="[1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]"
 export OPTIMIZER_SAVE_STEPS="[50,150]"     # only these two are resumable
 
+# ------------------------------------------------------------------ smoke mode
+# SMOKE=1 runs a few cheap steps to prove the pipeline before committing 5-6 hours.
+# Shrinks length/batch/steps and writes to its own checkpoint directory so it can
+# never collide with a real run. Everything else -- the objective, the reward path,
+# the diagnostics -- is identical, which is the point: a shape mismatch in the
+# diagnostics is fatal on the first batch, so this is where it surfaces.
+if [ "${SMOKE:-0}" = "1" ]; then
+    export MAX_RESP_LENGTH=1024
+    export MAX_MODEL_LEN=$(( MAX_PROMPT_LENGTH + MAX_RESP_LENGTH + 1 ))
+    export TRAIN_BATCH_SIZE=8
+    export MINI_BATCH_SIZE=8
+    export TOTAL_STEPS=3
+    export SAVE_STEPS="[3]"
+    export OPTIMIZER_SAVE_STEPS="[3]"
+    export ACTOR_MAX_TOKEN_LEN=4096
+    export TEACHER_MAX_TOKEN_LEN=4096
+    echo "=== SMOKE MODE: 3 steps, batch 8, 1024 tokens ==="
+fi
+
 export PROJECT_PATH=checkpoint
-export EXPERIMENT_NAME=stdopd_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_len${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-bs${TRAIN_BATCH_SIZE}-lr${LR}-clip${ADV_CLIP_RANGE}
+export EXPERIMENT_NAME=${SMOKE:+smoke_}stdopd_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_len${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-bs${TRAIN_BATCH_SIZE}-lr${LR}-clip${ADV_CLIP_RANGE}
 export CKPT_PATH=${PROJECT_PATH}/${EXPERIMENT_NAME}
 export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 
