@@ -1,0 +1,29 @@
+# Training and benchmark logs
+logs/
+*.log
+
+# Diagnostic outputs and analysis results
+diag_out/
+
+# Checkpoints, merged HF conversions, and downloaded models
+checkpoint/
+hf_ckpts*/
+model/
+outputs/
+
+# Artifacts retrieved from remote runs (logs, swanlab, manifests)
+opd_artifacts/
+
+# SwanLab
+swanlog/
+swanlab_log/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Ray
+/tmp/ray/

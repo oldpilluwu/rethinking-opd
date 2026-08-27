@@ -631,6 +631,17 @@ def cmd_bench(args):
                 f"trunc={row['truncation_rate']:.3f}  rep={row['repetition_rate']:.3f}{delta}"
             )
 
+        # Flush after every model. This job runs for hours on machines that can go
+        # away, and holding every result until the end means an interrupted run
+        # yields nothing. Written via a temp file + rename so a kill mid-write
+        # cannot leave a truncated JSON behind.
+        os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+        _tmp = args.out + '.tmp'
+        with open(_tmp, 'w') as _f:
+            json.dump(all_rows, _f, indent=2)
+        os.replace(_tmp, args.out)
+        print(f'  [saved {len(all_rows)} rows -> {args.out}]', flush=True)
+
     print("\n" + "=" * 118)
     print(
         f"{'ckpt':>10}{'benchmark':>18}{'avg@' + str(args.k):>10}{'pass@1':>9}{'p50':>8}{'p95':>8}"
