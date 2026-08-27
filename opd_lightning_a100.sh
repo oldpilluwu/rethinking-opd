@@ -93,7 +93,7 @@ export TEACHER_TEMPERATURE=1.0
 export LR=1e-6                             # 1e-6, not Lightning's 2e-6 (their students are 4B/8B)
 export WEIGHT_DECAY=0.1
 export ADAM_BETAS="[0.9,0.98]"
-export TOTAL_STEPS=150
+export TOTAL_STEPS=${TOTAL_STEPS:-100}
 
 export LOG_PROB_TOP_K=0                    # 0 = standard / sampled-token OPD
 export DIAGNOSTIC_TOP_K=16                 # logging only; does not enter the loss
@@ -118,8 +118,8 @@ export OPTIMIZER_OFFLOAD=False             # [48GB] True if OOM
 export TEACHER_PARAM_OFFLOAD=${TEACHER_PARAM_OFFLOAD:-False}
 
 # --------------------------------------------------------------- checkpoints
-export SAVE_STEPS="[1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]"
-export OPTIMIZER_SAVE_STEPS="[50,150]"     # only these two are resumable
+export SAVE_STEPS="[1,2,3,4,5,10,15,20,25,30,50,75,100]"
+export OPTIMIZER_SAVE_STEPS="[50,100]"     # only these two are resumable
 
 # ------------------------------------------------------------------ smoke mode
 # SMOKE=1 runs a few cheap steps to prove the pipeline before committing 5-6 hours.
