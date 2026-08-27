@@ -143,6 +143,11 @@ class RolloutConfig(BaseConfig):
     top_k_strategy: str = "only_stu"  # "only_stu", "only_tch", "intersection", or "union"
     reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", or "none"
     teacher_temperature: float = 1.0  # Temperature for teacher logits (default 1.0, no scaling)
+    # Diagnostics-only top-k. Decoupled from log_prob_top_k so that sampled-token
+    # ("standard") OPD (log_prob_top_k=0) can still report student/teacher top-k
+    # overlap metrics without rerouting the reward through the top-k pathway.
+    # Only has an effect when log_prob_top_k == 0; ignored otherwise.
+    diagnostic_top_k: int = 0
 
     disable_log_stats: bool = True
 

@@ -785,7 +785,7 @@ class RayPPOTrainer:
                 config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, save_contents=None):
         from verl.utils.fs import local_mkdir_safe
 
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -816,7 +816,11 @@ class RayPPOTrainer:
         )
 
         self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            actor_local_path,
+            actor_remote_path,
+            self.global_steps,
+            max_ckpt_to_keep=max_actor_ckpt_to_keep,
+            save_contents_override=save_contents,
         )
 
         if self.use_critic:
@@ -837,6 +841,52 @@ class RayPPOTrainer:
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
+
+        # Manifest. The checkpoint directory is created but never cleared, so a stale
+        # optim_*.pt left by an earlier run can make a model-only checkpoint look
+        # resumable. Record what this save actually wrote, and write the completion
+        # marker only after every expected file is on disk -- an interrupted save is
+        # then identifiable rather than silently half-present.
+        import glob as _glob
+        import json as _json
+
+        contents = list(save_contents) if save_contents else list(
+            self.config.actor_rollout_ref.actor.checkpoint.save_contents
+        )
+        expected = []
+        if "model" in contents:
+            expected.append("model_world_size_*_rank_*.pt")
+        if "optimizer" in contents:
+            expected.append("optim_world_size_*_rank_*.pt")
+        if "extra" in contents:
+            expected.append("extra_state_world_size_*_rank_*.pt")
+
+        present = {pat: len(_glob.glob(os.path.join(actor_local_path, pat))) for pat in expected}
+        complete = all(v > 0 for v in present.values()) and os.path.exists(dataloader_local_path)
+        stale_optim = "optimizer" not in contents and _glob.glob(
+            os.path.join(actor_local_path, "optim_world_size_*_rank_*.pt")
+        )
+
+        manifest = {
+            "global_step": self.global_steps,
+            "save_contents": contents,
+            "resumable": ("optimizer" in contents) and complete,
+            "complete": bool(complete),
+            "files_present": present,
+            "has_dataloader_state": os.path.exists(dataloader_local_path),
+        }
+        if stale_optim:
+            # Model-only step carrying an optimizer file it did not write.
+            manifest["resumable"] = False
+            manifest["stale_optimizer_files"] = [os.path.basename(p) for p in stale_optim]
+            print(
+                f"WARNING: step {self.global_steps} was saved without optimizer state but "
+                f"optim_*.pt files are present from an earlier run. Marked NOT resumable. "
+                f"Use a fresh checkpoint directory."
+            )
+
+        with open(os.path.join(local_global_step_folder, "manifest.json"), "w") as f:
+            _json.dump(manifest, f, indent=2)
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
@@ -1125,7 +1175,10 @@ class RayPPOTrainer:
                             batch.meta_info["is_plot"] = self.config.trainer.get("is_plot", False)
                             teacher_temperature = self.config.actor_rollout_ref.rollout.get("teacher_temperature", 1.0)
 
+                            diagnostic_top_k = self.config.actor_rollout_ref.rollout.get("diagnostic_top_k", 0)
+
                             batch.meta_info["log_prob_top_k"] = top_k
+                            batch.meta_info["diagnostic_top_k"] = diagnostic_top_k
                             batch.meta_info["top_k_strategy"] = strategy
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
@@ -1304,6 +1357,29 @@ class RayPPOTrainer:
                                 )
                                 metrics.update({"teacher/entropy": teacher_entropy_agg.detach().item()})
 
+                                # Signed and absolute entropy gap. Computed here because
+                                # "entropys" is popped a few lines below, before the OPD
+                                # diagnostics block runs. A student entropy collapsing
+                                # below the teacher's is over-distillation, and neither
+                                # series shows that on its own.
+                                _gap = entropys.to(torch.float32) - teacher_entropy.to(torch.float32)
+                                metrics.update(
+                                    {
+                                        "opd/entropy_gap_signed": agg_loss(
+                                            loss_mat=_gap, loss_mask=response_masks, loss_agg_mode=loss_agg_mode
+                                        )
+                                        .detach()
+                                        .item(),
+                                        "opd/entropy_gap_abs": agg_loss(
+                                            loss_mat=_gap.abs(),
+                                            loss_mask=response_masks,
+                                            loss_agg_mode=loss_agg_mode,
+                                        )
+                                        .detach()
+                                        .item(),
+                                    }
+                                )
+
                             # Cleanup: We are done with entropys
                             if "entropys" in batch.batch.keys():
                                 batch.batch.pop("entropys")
@@ -1386,7 +1462,61 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
- 
+
+                        # --- OPD diagnostics ---
+                        # Computed at the student-visited states of this step, from tensors
+                        # that are discarded at the end of it. Cannot be reconstructed from a
+                        # checkpoint, which is why it lives here and not in offline analysis.
+                        #
+                        # Gated on the distillation estimator. Under GRPO/PPO the batch still
+                        # carries rm_scores and response_mask, but rm_scores there is an
+                        # OUTCOME REWARD, not a teacher/student log-ratio -- logging it as
+                        # "opd/reverse_kl_sampled" would be actively wrong rather than merely
+                        # noisy. trainer.opd_diagnostics can force it off entirely.
+                        _opd_estimators = ("token_reward_direct", "token_reward_direct_plus_grpo")
+                        if self.config.trainer.get("opd_diagnostics", True) and (
+                            self.config.algorithm.adv_estimator in _opd_estimators
+                        ):
+                            try:
+                                from verl.trainer.ppo.opd_diagnostics import (
+                                    compute_opd_diagnostics,
+                                    compute_text_diagnostics,
+                                )
+
+                                metrics.update(
+                                    compute_opd_diagnostics(
+                                        batch,
+                                        adv_clip_range=self.config.algorithm.get("adv_clip_range", 0.0),
+                                    )
+                                )
+                                if self.config.trainer.get("opd_text_diagnostics", True):
+                                    metrics.update(
+                                        compute_text_diagnostics(
+                                            responses=batch.batch["responses"],
+                                            response_mask=batch.batch["response_mask"],
+                                            tokenizer=self.tokenizer,
+                                        )
+                                    )
+                                self._opd_diag_ok = True
+                                metrics["opd/diagnostics_ok"] = 1.0
+                            except Exception as e:
+                                self._opd_diag_errors = getattr(self, "_opd_diag_errors", 0) + 1
+                                metrics["opd/diagnostics_ok"] = 0.0
+                                metrics["opd/diagnostics_error_count"] = float(self._opd_diag_errors)
+                                # Fail fast until one real batch has produced metrics. The
+                                # tensor shapes here are inferred from the reward-model
+                                # worker's padding logic, not observed; swallowing the first
+                                # failure would mean discovering at step 150 that the entire
+                                # run has no OPD diagnostics. After one success, later
+                                # failures are transient and non-fatal.
+                                if not getattr(self, "_opd_diag_ok", False):
+                                    raise RuntimeError(
+                                        f"OPD diagnostics failed on the first batch: "
+                                        f"{type(e).__name__}: {e}\n"
+                                        f"Fix the diagnostics or set trainer.opd_diagnostics=False "
+                                        f"to train without them."
+                                    ) from e
+                                print(f"[opd-diagnostics] skipped this step: {type(e).__name__}: {e}")
 
                         # --- Top-K Metrics Analysis (Chunked) ---
                         if "overlap_mask" in batch.batch.keys() and "advantages" in batch.batch.keys():
@@ -2289,13 +2419,31 @@ class RayPPOTrainer:
                 # 2. It's the last training step.
                 # 3. The current step number is a multiple of the save frequency.
                 # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                ):
+                # 5. The current step is in the explicit trainer.save_steps allowlist.
+                _save_steps = self.config.trainer.get("save_steps", None)
+                _optim_steps = self.config.trainer.get("optimizer_save_steps", None)
+
+                _freq_hit = self.config.trainer.save_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                )
+                _list_hit = _save_steps is not None and self.global_steps in set(_save_steps)
+
+                if _freq_hit or _list_hit or esi_close_to_expiration:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
+
+                    # Optimizer state only on the steps that need to be resumable. Everything
+                    # else is model+extra, which is ~1/3 the size but cannot be resumed from.
+                    # ESI-forced saves always write full contents so the run stays recoverable.
+                    _contents = None
+                    if _optim_steps is not None and not esi_close_to_expiration:
+                        if self.global_steps in set(_optim_steps):
+                            _contents = ["model", "optimizer", "extra"]
+                        else:
+                            _contents = ["model", "extra"]
+
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
+                        self._save_checkpoint(save_contents=_contents)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

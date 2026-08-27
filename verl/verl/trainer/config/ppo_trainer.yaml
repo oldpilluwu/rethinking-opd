@@ -83,6 +83,12 @@ algorithm:
   # Weight for GRPO outcome advantage in hybrid estimator
   grpo_outcome_weight: 1.0
 
+  # Symmetric clip on per-token distillation advantages (token_reward_direct).
+  # The reward is teacher_logp - student_logp and is unbounded below, so tokens the
+  # teacher finds very unlikely can otherwise dominate a step.
+  # Lightning OPD (arXiv 2604.13010, Table 6) uses 10.0. Set 0 to disable.
+  adv_clip_range: 0.0
+
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
 
@@ -144,6 +150,15 @@ trainer:
   log_val_generations: 0
   is_plot: False
 
+  # On-policy-distillation diagnostics. Only ever run when algorithm.adv_estimator is a
+  # distillation estimator; under GRPO/PPO they are skipped regardless of this flag,
+  # because rm_scores there is an outcome reward rather than a teacher/student log-ratio.
+  opd_diagnostics: True
+
+  # Decode a subsample of rollouts each step for failure-mode canaries
+  # (think-token leakage, boxed-answer rate, degenerate repetition).
+  opd_text_diagnostics: True
+
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
@@ -158,6 +173,16 @@ trainer:
 
   # Save frequency (by iteration) for model checkpoints
   save_freq: -1
+
+  # Explicit allowlist of global steps at which to save a checkpoint. Applied in addition
+  # to save_freq, so save_freq can stay -1 and the schedule be driven entirely by this list.
+  # Example: [1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]
+  save_steps: null
+
+  # Subset of steps at which the optimizer state is written as well. Steps in save_steps but
+  # not here are saved as model+extra only (roughly a third of the size, but NOT resumable).
+  # Leave null to use actor.checkpoint.save_contents unchanged for every save.
+  optimizer_save_steps: null
 
   # ESI refers to the elastic server instance used during training, similar to the training plan. For example,
   # if you purchase 10 hours of computing power, the ESI will automatically shut down after 10 hours of training.

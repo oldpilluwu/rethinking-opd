@@ -40,6 +40,9 @@ class OptimizerConfig(BaseConfig):
     lr_warmup_steps_ratio: float = 0.0
     total_training_steps: int = -1
     weight_decay: float = 0.01
+    # Adam epsilon. Pinned rather than left to the torch default so the recipe survives
+    # a future change to that default. Megatron's --adam-eps default is also 1e-8.
+    eps: float = 1e-8
     lr_warmup_steps: Optional[int] = -1
     betas: tuple[float, float] = (0.9, 0.999)
     clip_grad: float = 1.0
@@ -156,6 +159,9 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig):
     optimizer_name_lower = config.optimizer.lower()
     if "adam" in optimizer_name_lower or "ademamix" in optimizer_name_lower:
         optimizer_args["betas"] = config.betas
+        eps = config.get("eps", None) if hasattr(config, "get") else getattr(config, "eps", None)
+        if eps is not None:
+            optimizer_args["eps"] = eps
 
     if config.override_optimizer_config is not None:
         optimizer_args.update(config.override_optimizer_config)

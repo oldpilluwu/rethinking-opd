@@ -349,6 +349,11 @@ class AlgoConfig(BaseConfig):
     adv_estimator: str = "gae"
     norm_adv_by_std_in_grpo: bool = True
     grpo_outcome_weight: float = 1.0
+    # Symmetric clip applied to per-token distillation advantages (token_reward_direct).
+    # The reward is teacher_logp - student_logp and is otherwise unbounded below, so a
+    # handful of tokens the teacher considers very unlikely can dominate a step.
+    # Lightning OPD (arXiv 2604.13010, Table 6) uses [-10, 10]. Set <= 0 to disable.
+    adv_clip_range: float = 0.0
     use_kl_in_reward: bool = False
     kl_penalty: str = "kl"
     kl_ctrl: KLControlConfig = field(default_factory=KLControlConfig)

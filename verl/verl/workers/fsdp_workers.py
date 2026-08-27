@@ -976,7 +976,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
-        data.meta_info["top_k"] = self.config.rollout.get("log_prob_top_k", 0)
+        # Effective top-k for the student forward pass.
+        # log_prob_top_k > 0  -> top-k OPD; the top-k tensors feed the reward.
+        # log_prob_top_k == 0 -> sampled-token ("standard") OPD. The reward path does not
+        #   need top-k, but diagnostic_top_k lets us still emit student top-k ids/logprobs
+        #   purely so the teacher can report overlap metrics. The reward branch keys off
+        #   log_prob_top_k (not this value), so the algorithm is unchanged.
+        _loss_top_k = self.config.rollout.get("log_prob_top_k", 0)
+        _diag_top_k = self.config.rollout.get("diagnostic_top_k", 0)
+        data.meta_info["top_k"] = _loss_top_k if _loss_top_k > 0 else _diag_top_k
         # data.meta_info["top_p"] = 1.0
         # print("log_prob_top_k", data.meta_info["top_k"])
         # perform recompute log_prob
@@ -1111,7 +1119,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+    def save_checkpoint(
+        self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None, save_contents_override=None
+    ):
         from verl.utils.logger import log_with_rank
 
         # only support save and load ckpt for actor
@@ -1120,9 +1130,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        self.checkpoint_manager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
-        )
+        # Per-step override of what goes into this checkpoint (see trainer.optimizer_save_steps).
+        # Restored afterwards so the configured default is never permanently mutated.
+        _prev_save_contents = self.checkpoint_manager.checkpoint_save_contents
+        if save_contents_override is not None:
+            self.checkpoint_manager.checkpoint_save_contents = list(save_contents_override)
+        try:
+            self.checkpoint_manager.save_checkpoint(
+                local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+            )
+        finally:
+            self.checkpoint_manager.checkpoint_save_contents = _prev_save_contents
         dist.barrier()
 
         if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
@@ -2611,6 +2629,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             top_k = data.meta_info.get("log_prob_top_k", self.config.get("log_prob_top_k", 0))
             top_k_strategy = data.meta_info.get("top_k_strategy", self.config.get("top_k_strategy", "only_stu"))
             teacher_temperature = data.meta_info.get("teacher_temperature", self.config.get("teacher_temperature", 1.0))
+            # Diagnostics-only top-k (see rollout config). When log_prob_top_k == 0 we are
+            # running sampled-token OPD; diag_top_k > 0 makes the teacher additionally emit
+            # top-k ids/logprobs and overlap masks for logging, without touching the reward.
+            diag_top_k = data.meta_info.get("diagnostic_top_k", self.config.get("diagnostic_top_k", 0))
+            effective_top_k = top_k if top_k > 0 else diag_top_k
             
             output_logp = []
             output_on_student_logp = []
@@ -2640,7 +2663,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     micro_batch, 
                     student_top_k_ids=mb_top_k_ids,
                     compute_entropy=compute_entropy,
-                    top_k=top_k,
+                    top_k=effective_top_k,
                     strategy=top_k_strategy,
                     teacher_temperature=teacher_temperature
                 )
@@ -2712,16 +2735,21 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             if top_k > 0:
                 # Reward calculation is moved to ray_trainer for top_k > 0
                 # because it needs student_on_teacher_log_probs which requires another actor forward
-                rm_scores = None 
+                rm_scores = None
                 overlap_mask = teacher_overlap_mask
             else:
-                print("Top-k log probs not present, just using student_logp - teacher_logp as reward")
-                
+                # Sampled-token ("standard") OPD: the per-token reward is the negative
+                # reverse KL on the sampled token. This is unchanged by diag_top_k.
                 reverse_kl = student_logp - teacher_logp
                 rm_scores = -reverse_kl
-                
-                teacher_valid_counts = None
-                overlap_mask = None
+
+                if diag_top_k > 0:
+                    # Diagnostics-only: keep the overlap tensors the teacher just computed so
+                    # ray_trainer can log alignment metrics. The reward above is untouched.
+                    overlap_mask = teacher_overlap_mask
+                else:
+                    teacher_valid_counts = None
+                    overlap_mask = None
             
             tensors = {}
             if rm_scores is not None:

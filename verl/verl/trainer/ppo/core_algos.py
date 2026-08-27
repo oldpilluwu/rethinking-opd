@@ -874,9 +874,18 @@ def compute_token_reward_direct_advantage(
         # If rewards are 3D (batch, seq_len, k), broadcast mask to (batch, seq_len, 1)
         if token_level_rewards.dim() == 3:
             response_mask = response_mask.unsqueeze(-1)
+
+        # Symmetric advantage clip. The distillation reward is teacher_logp - student_logp,
+        # which is unbounded below: a token the teacher assigns near-zero probability
+        # produces a large negative outlier that can dominate the gradient for the step.
+        # Lightning OPD (arXiv 2604.13010, Table 6) clips to [-10, 10].
+        clip_range = getattr(config, "adv_clip_range", 0.0) if config is not None else 0.0
+        if clip_range and clip_range > 0:
+            token_level_rewards = torch.clamp(token_level_rewards, min=-clip_range, max=clip_range)
+
         advantages = token_level_rewards * response_mask
         returns = advantages.clone()
-    
+
     return advantages, returns
 
 

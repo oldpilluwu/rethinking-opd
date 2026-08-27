@@ -26,6 +26,9 @@ lr_warmup_steps: -1
 # Betas for Adam optimizer
 betas: [0.9, 0.999]
 
+# Adam epsilon (Megatron's --adam-eps default is the same)
+eps: 1e-8
+
 # Clip gradient
 clip_grad: 1.0
 
