@@ -42,6 +42,9 @@ import pyarrow.parquet as pq
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "verl"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _gpu_isolate import run_isolated
 
 # FlashInfer JIT-compiles its sampling kernels and needs nvcc (the CUDA toolkit, not
 # just the driver). Fall back to vLLM's native top-k/top-p sampler when nvcc is absent.
@@ -141,15 +144,8 @@ def run_model(model_path, prompts, k, max_tokens, temperature, top_p, gpu_mem_ut
                 repeat_hits += 1
         per_prompt.append(correct)
 
-    del llm
-    gc.collect()
-    try:
-        import torch
-
-        torch.cuda.empty_cache()
-    except Exception:
-        pass
-
+    # No explicit teardown: this function runs inside a throwaway process (see
+    # run_isolated), so the OS reclaims the engine and its GPU memory on exit.
     n = len(per_prompt)
     pass1 = sum(c[0] for c in per_prompt) / n
     pass1_avg = sum(sum(c) / len(c) for c in per_prompt) / n
@@ -219,14 +215,18 @@ def main():
     print(f"{len(prompts)} prompts | k={args.k} | thinking={'on' if args.enable_thinking else 'off'}\n")
 
     print("=== student ===")
-    student = run_model(
-        args.student, prompts, args.k, args.max_tokens, args.temperature,
-        args.top_p, args.gpu_mem_util, args.enable_thinking,
+    student = run_isolated(
+        run_model,
+        model_path=args.student, prompts=prompts, k=args.k, max_tokens=args.max_tokens,
+        temperature=args.temperature, top_p=args.top_p, gpu_mem_util=args.gpu_mem_util,
+        enable_thinking=args.enable_thinking,
     )
     print("\n=== teacher ===")
-    teacher = run_model(
-        args.teacher, prompts, args.k, args.max_tokens, args.temperature,
-        args.top_p, args.gpu_mem_util, args.enable_thinking,
+    teacher = run_isolated(
+        run_model,
+        model_path=args.teacher, prompts=prompts, k=args.k, max_tokens=args.max_tokens,
+        temperature=args.temperature, top_p=args.top_p, gpu_mem_util=args.gpu_mem_util,
+        enable_thinking=args.enable_thinking,
     )
 
     kk = f"pass@{args.k}"

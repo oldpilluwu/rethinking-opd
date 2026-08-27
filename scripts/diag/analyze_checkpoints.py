@@ -42,6 +42,10 @@ import re
 
 import torch
 
+import sys as _sys_boot
+_sys_boot.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _gpu_isolate import run_isolated
+
 # FlashInfer JIT-compiles its sampling kernels and needs nvcc (the CUDA toolkit, not
 # just the driver). Fall back to vLLM's native top-k/top-p sampler when nvcc is absent.
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
@@ -416,6 +420,97 @@ def cmd_probe(args):
 
 
 # -------------------------------------------------------------------------- bench
+def _bench_one_model(model_path, benches, k, temperature, top_p, max_tokens, gpu_mem_util, seed):
+    """Generate and grade one model against every benchmark.
+
+    Module-level so it can be pickled into an isolated subprocess. vLLM v1 runs its
+    engine in a child process that `del llm` does not reliably reap, so loading 17
+    checkpoints in one process leaves the GPU occupied and the second model fails with
+    "Free memory on device ... is less than desired GPU memory utilization". One process
+    per model, and the OS frees everything on exit.
+    """
+    import os as _os
+    import sys as _sys
+
+    _os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    _repo = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    if _os.path.join(_repo, "verl") not in _sys.path:
+        _sys.path.insert(0, _os.path.join(_repo, "verl"))
+
+    from transformers import AutoTokenizer
+    from vllm import LLM, SamplingParams
+
+    from verl.trainer.ppo.opd_diagnostics import REPETITION_THRESHOLD, repetition_score
+    from verl.utils.reward_score.ttrl_math import reward_func
+
+    tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    llm = LLM(
+        model=model_path,
+        gpu_memory_utilization=gpu_mem_util,
+        max_model_len=max_tokens + 1024,
+        trust_remote_code=True,
+        dtype="bfloat16",
+    )
+    # Fixed seed so reruns of a checkpoint reproduce, and different checkpoints face the
+    # same sampling noise.
+    sp = SamplingParams(n=k, temperature=temperature, top_p=top_p, max_tokens=max_tokens, seed=seed)
+
+    out = {}
+    for name, rows in benches.items():
+        rendered = []
+        for r in rows:
+            try:
+                rendered.append(
+                    tok.apply_chat_template(
+                        r["prompt"], tokenize=False, add_generation_prompt=True, enable_thinking=False
+                    )
+                )
+            except TypeError:
+                rendered.append(
+                    tok.apply_chat_template(r["prompt"], tokenize=False, add_generation_prompt=True)
+                )
+
+        outs = llm.generate(rendered, sp)
+        per_problem, lengths, rep_scores = [], [], []
+        trunc, total = 0, 0
+        for r, o in zip(rows, outs):
+            gt = str(r["reward_model"]["ground_truth"])
+            flags = []
+            for cand in o.outputs:
+                total += 1
+                lengths.append(len(cand.token_ids))
+                ok = False
+                try:
+                    res = reward_func(r["data_source"], cand.text, gt)
+                    if isinstance(res, dict):
+                        res = res.get("score", 0.0)
+                    ok = float(res) > 0.5
+                except Exception:
+                    pass
+                flags.append(ok)
+                if getattr(cand, "finish_reason", None) == "length":
+                    trunc += 1
+                sc = repetition_score(cand.text)
+                if sc is not None:
+                    rep_scores.append(sc)
+            per_problem.append(flags)
+
+        lengths.sort()
+        out[name] = {
+            "per_problem": per_problem,
+            "lengths": lengths,
+            "trunc": trunc,
+            "total": total,
+            "rep_mean": (sum(rep_scores) / len(rep_scores)) if rep_scores else 0.0,
+            "rep_rate": (
+                sum(s >= REPETITION_THRESHOLD for s in rep_scores) / len(rep_scores)
+                if rep_scores
+                else 0.0
+            ),
+        }
+    return out
+
+
 def cmd_bench(args):
     """Behavioural benchmark over merged HF checkpoints.
 
@@ -429,27 +524,18 @@ def cmd_bench(args):
     --preset health   Training-style prompts at the OPD sampling settings (T=1.0,
                       top-p 1.0) and the training response limit. A bounded-length
                       collapse check, NOT a paper-comparable accuracy number.
-                      T=1.0 tracks the launch script; see the temperature note there.
 
     Alongside accuracy this reports length percentiles, truncation and repetition,
     because the reported OPD collapse mode is abrupt length inflation -- truncated
     trajectories come to dominate and accuracy hides it until late
     (StableOPD, arXiv 2604.08527).
 
-    The SFT init and the teacher are always included as baseline rows: an accuracy
-    column with no step-0 reference cannot be read. Sampling is seeded per prompt so
-    reruns are comparable, and pass@k plus a paired bootstrap CI against step 0 are
-    reported -- on AIME24's 30 problems, avg@16 differences of several points are noise.
+    The SFT init and the teacher are always run as baseline rows: an accuracy column
+    with no step-0 reference cannot be read. Sampling is seeded, and pass@k plus a
+    paired bootstrap CI against step 0 are reported -- on AIME24's 30 problems, avg@16
+    differences of several points are routinely noise.
     """
     import pyarrow.parquet as pq
-    from transformers import AutoTokenizer
-    from vllm import LLM, SamplingParams
-
-    sys_path_added = os.path.join(REPO_ROOT_FOR_REWARD, "verl")
-    if sys_path_added not in os.sys.path:
-        os.sys.path.insert(0, sys_path_added)
-    from verl.trainer.ppo.opd_diagnostics import REPETITION_THRESHOLD, repetition_score
-    from verl.utils.reward_score.ttrl_math import reward_func
 
     if args.preset == "paper":
         temperature, top_p = 0.7, 0.95
@@ -459,85 +545,46 @@ def cmd_bench(args):
         max_tokens = args.max_tokens or 4096
     print(f"preset={args.preset}  T={temperature}  top_p={top_p}  max_tokens={max_tokens}  k={args.k}\n")
 
-    bench_files = args.benchmarks.split(",")
     benches = {}
-    for bf in bench_files:
+    for bf in args.benchmarks.split(","):
         name = os.path.basename(os.path.dirname(bf))
         benches[name] = pq.read_table(bf).to_pylist()
         print(f"{name}: {len(benches[name])} problems")
 
-    # Baselines are mandatory, not optional: the checkpoint accuracies are only
-    # interpretable relative to the SFT init, and the teacher bounds what OPD can reach.
-    targets = []
-    if args.sft:
-        targets.append((args.sft, "sft", -1))
+    # Baselines are mandatory, not optional: checkpoint accuracies are only interpretable
+    # relative to the SFT init, and the teacher bounds what OPD can reach.
+    targets = [(args.sft, "sft", -1)]
     if args.teacher:
         targets.append((args.teacher, "teacher", -2))
     targets += [(d, f"step_{step_of(d)}", step_of(d)) for d in list_steps(args.hf_dir)]
 
-    baseline_correct = {}  # (label, bench) -> per-problem correctness lists
+    baseline_correct = {}
     all_rows = []
     for target, label, step in targets:
         print(f"\n=== {label} ===")
+        try:
+            raw = run_isolated(
+                _bench_one_model,
+                model_path=target,
+                benches=benches,
+                k=args.k,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                gpu_mem_util=args.gpu_mem_util,
+                seed=args.seed,
+            )
+        except Exception as e:
+            print(f"  skipped: {e}")
+            continue
 
-        tok = AutoTokenizer.from_pretrained(target, trust_remote_code=True)
-        llm = LLM(
-            model=target,
-            gpu_memory_utilization=args.gpu_mem_util,
-            max_model_len=max_tokens + 1024,
-            trust_remote_code=True,
-            dtype="bfloat16",
-        )
-        # Fixed seed so reruns of the same checkpoint are reproducible and different
-        # checkpoints face the same sampling noise.
-        sp = SamplingParams(
-            n=args.k, temperature=temperature, top_p=top_p, max_tokens=max_tokens, seed=args.seed
-        )
-
-        for name, rows in benches.items():
-            rendered = []
-            for r in rows:
-                try:
-                    rendered.append(
-                        tok.apply_chat_template(
-                            r["prompt"], tokenize=False, add_generation_prompt=True, enable_thinking=False
-                        )
-                    )
-                except TypeError:
-                    rendered.append(tok.apply_chat_template(r["prompt"], tokenize=False, add_generation_prompt=True))
-
-            outs = llm.generate(rendered, sp)
-            per_problem, lengths, trunc = [], [], 0
-            rep_scores = []
-            total = 0
-            for r, out in zip(rows, outs):
-                gt = str(r["reward_model"]["ground_truth"])
-                flags = []
-                for cand in out.outputs:
-                    total += 1
-                    lengths.append(len(cand.token_ids))
-                    ok = False
-                    try:
-                        res = reward_func(r["data_source"], cand.text, gt)
-                        if isinstance(res, dict):
-                            res = res.get("score", 0.0)
-                        ok = float(res) > 0.5
-                    except Exception:
-                        pass
-                    flags.append(ok)
-                    if getattr(cand, "finish_reason", None) == "length":
-                        trunc += 1
-                    s = repetition_score(cand.text)
-                    if s is not None:
-                        rep_scores.append(s)
-                per_problem.append(flags)
-
-            lengths.sort()
-
-            def _pct(p):
-                return lengths[int(p * (len(lengths) - 1))] if lengths else 0
-
+        for name, d in raw.items():
+            per_problem, lengths = d["per_problem"], d["lengths"]
             n_prob = max(len(per_problem), 1)
+
+            def _pct(q, _l=lengths):
+                return _l[int(q * (len(_l) - 1))] if _l else 0
+
             row = {
                 "checkpoint": label,
                 "step": step,
@@ -547,13 +594,9 @@ def cmd_bench(args):
                 "p50_len": _pct(0.50),
                 "p95_len": _pct(0.95),
                 "p99_len": _pct(0.99),
-                "truncation_rate": trunc / max(total, 1),
-                "repetition_score_mean": (sum(rep_scores) / len(rep_scores)) if rep_scores else 0.0,
-                "repetition_rate": (
-                    sum(s >= REPETITION_THRESHOLD for s in rep_scores) / len(rep_scores)
-                    if rep_scores
-                    else 0.0
-                ),
+                "truncation_rate": d["trunc"] / max(d["total"], 1),
+                "repetition_score_mean": d["rep_mean"],
+                "repetition_rate": d["rep_rate"],
             }
             # pass@j for j = 1, 4, 8, k -- avg@k alone hides whether the model gained
             # reliability or only lost diversity.
@@ -570,7 +613,8 @@ def cmd_bench(args):
 
             all_rows.append(row)
             delta = (
-                f"  d_vs_sft={row['delta_avg_vs_sft']:+.4f} [{row['delta_ci95'][0]:+.3f},{row['delta_ci95'][1]:+.3f}]"
+                f"  d_vs_sft={row['delta_avg_vs_sft']:+.4f}"
+                f" [{row['delta_ci95'][0]:+.3f},{row['delta_ci95'][1]:+.3f}]"
                 if "delta_ci95" in row
                 else ""
             )
@@ -580,12 +624,9 @@ def cmd_bench(args):
                 f"trunc={row['truncation_rate']:.3f}  rep={row['repetition_rate']:.3f}{delta}"
             )
 
-        del llm
-        torch.cuda.empty_cache()
-
     print("\n" + "=" * 118)
     print(
-        f"{'ckpt':>10}{'benchmark':>18}{'avg@'+str(args.k):>10}{'pass@1':>9}{'p50':>8}{'p95':>8}"
+        f"{'ckpt':>10}{'benchmark':>18}{'avg@' + str(args.k):>10}{'pass@1':>9}{'p50':>8}{'p95':>8}"
         f"{'trunc':>8}{'rep':>7}{'delta vs sft (95% CI)':>28}"
     )
     print("-" * 118)
