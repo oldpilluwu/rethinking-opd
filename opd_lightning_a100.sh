@@ -33,10 +33,17 @@ export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 # NOTE: CUDA_LAUNCH_BLOCKING is deliberately NOT set. The upstream script sets it
 # to 1, which serializes every kernel launch and costs real throughput.
 
-# --- SwanLab run identity -----------------------------------------------------
+# --- SwanLab -------------------------------------------------------------------
+# Without SWANLAB_MODE set, swanlab prompts interactively for an API key on first use
+# and blocks the run. offline writes to SWANLAB_LOG_DIR and needs no account; view it
+# afterwards (or live, in another shell) with:
+#     swanlab watch checkpoint/swanlab_log
+# Use cloud instead if you have a key: SWANLAB_MODE=cloud SWANLAB_API_KEY=... bash ...
+export SWANLAB_MODE=${SWANLAB_MODE:-offline}
+export PROJECT_NAME='OPD-Lightning-Repro'
+
 # Set BOTH of these before a resume, or the diagnostic curves split into two
 # disconnected traces at the resume boundary. Record the ID somewhere durable.
-export PROJECT_NAME='OPD-Lightning-Repro'
 # export SWANLAB_RESUME=must
 # export SWANLAB_RUN_ID="<paste-run-id-here-when-resuming>"
 
