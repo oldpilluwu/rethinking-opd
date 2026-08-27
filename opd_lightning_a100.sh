@@ -4,8 +4,9 @@
 #   student : Qwen3-1.7B-SFT      teacher : Qwen3-4B (non-thinking)
 #   hardware: 1 x A100 80GB       framework: this repo's verl 0.7.0.dev fork
 #
-# Recipe follows Lightning OPD (arXiv 2604.13010) Table 6 for the OPD stage,
-# with lr held at 1e-6 (this repo's value for the 1.7B scale) rather than 2e-6.
+# Recipe follows Lightning OPD (arXiv 2604.13010) Table 6 and their released config
+# for the OPD stage. Sole deliberate deviation: temperature 1.0 rather than 0.8, forced
+# by how this fork computes the student term of the reward (see TEMPERATURE below).
 #
 # "Standard OPD" == LOG_PROB_TOP_K=0: the per-token reward is the negative
 # reverse KL on the *sampled* token, applied via policy gradient. Setting
@@ -90,7 +91,15 @@ export TEMPERATURE=1.0
 export TOP_P=1.0
 export TEACHER_TEMPERATURE=1.0
 
-export LR=1e-6                             # 1e-6, not Lightning's 2e-6 (their students are 4B/8B)
+# Lightning Table 6 and their released config both specify 2e-6. An earlier run used
+# 1e-6 on the reasoning that a smaller student wants a smaller lr -- that is backwards:
+# smaller models conventionally take HIGHER learning rates, so 1.7B at 1e-6 against
+# their 4B/8B at 2e-6 was conservative twice over, and movement was correspondingly slow
+# (all alignment metrics inside noise after 10 steps).
+# The Rethinking paper does use 1e-6 with this exact 1.7B/4B pair -- but for top-k OPD,
+# whose gradient has far lower variance than the sampled-token objective run here.
+# Set LR=1e-6 to go back; the checkpoint directory is keyed on lr so runs never mix.
+export LR=${LR:-2e-6}
 export WEIGHT_DECAY=0.1
 export ADAM_BETAS="[0.9,0.98]"
 export TOTAL_STEPS=${TOTAL_STEPS:-100}
@@ -101,7 +110,7 @@ export TOP_K_STRATEGY=only_stu
 export REWARD_WEIGHT_MODE=student_p
 export LOSS_AGG_MODE=token-mean
 export MODEL_DTYPE=fp32                    # actor MASTER weights. FSDP already computes in
-                                           # bf16; bf16 masters would underflow at lr 1e-6.
+                                           # bf16; bf16 masters would underflow at these lrs.
 
 # ------------------------------------------------------- memory / throughput
 export N_GPUS=1
@@ -118,8 +127,11 @@ export OPTIMIZER_OFFLOAD=False             # [48GB] True if OOM
 export TEACHER_PARAM_OFFLOAD=${TEACHER_PARAM_OFFLOAD:-False}
 
 # --------------------------------------------------------------- checkpoints
-export SAVE_STEPS="[1,2,3,4,5,10,15,20,25,30,50,75,100]"
-export OPTIMIZER_SAVE_STEPS="[50,100]"     # only these two are resumable
+export SAVE_STEPS=${SAVE_STEPS:-"[1,2,3,4,5,10,15,20,25,30,50,75,100]"}
+# Optimizer state marks the resume points. 25 is included because it is the natural
+# early-evaluation checkpoint: stopping before 50 would otherwise leave nothing to
+# restart from. ~13.8 GB each.
+export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[25,50,100]"}
 
 # ------------------------------------------------------------------ smoke mode
 # SMOKE=1 runs a few cheap steps to prove the pipeline before committing 5-6 hours.
