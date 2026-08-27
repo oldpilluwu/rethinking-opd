@@ -433,6 +433,22 @@ def _bench_one_model(model_path, benches, k, temperature, top_p, max_tokens, gpu
     import sys as _sys
 
     _os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+    # The math grader nests three SIGALRM-based timeouts (timeout_ours, the timeout
+    # class, and math_verify's own). If one cancels another's alarm, a stray SIGALRM can
+    # arrive with no handler installed -- and SIGALRM's default disposition TERMINATES
+    # the process, silently, with no traceback. Install a permanent handler that raises
+    # instead, so a slow sympy comparison costs one graded sample, not the whole model.
+    import signal as _signal
+
+    def _alarm_guard(signum, frame):
+        raise TimeoutError("stray SIGALRM (grader timeout)")
+
+    try:
+        _signal.signal(_signal.SIGALRM, _alarm_guard)
+    except (ValueError, AttributeError):
+        pass  # not the main thread, or not POSIX
+
     _repo = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     if _os.path.join(_repo, "verl") not in _sys.path:
         _sys.path.insert(0, _os.path.join(_repo, "verl"))
@@ -565,9 +581,28 @@ def cmd_bench(args):
             print(f"  requested steps not found in {args.hf_dir}: {sorted(missing)}")
     targets += [(d, f"step_{step_of(d)}", step_of(d)) for d in ckpts]
 
-    baseline_correct = {}
+    # Resume: anything already in the output file is kept and not recomputed. A model
+    # costs ~25 minutes, so a crash partway through should not restart from zero.
     all_rows = []
+    if os.path.exists(args.out):
+        try:
+            all_rows = json.load(open(args.out))
+            _done = sorted({r['checkpoint'] for r in all_rows})
+            if _done:
+                print(f'resuming: {len(all_rows)} rows already present for {_done}')
+        except Exception as _e:
+            print(f'could not read {args.out} ({_e}); starting fresh')
+            all_rows = []
+    completed = {r['checkpoint'] for r in all_rows}
+    # Rehydrate the baseline from persisted rows so resumed models keep their CIs.
+    _restored = {r['benchmark']: r['_per_problem'] for r in all_rows
+                 if r['checkpoint'] == 'sft' and '_per_problem' in r}
+    baseline_correct = dict(_restored)
+
     for target, label, step in targets:
+        if label in completed:
+            print('=== ' + label + ' === (already done, skipping)')
+            continue
         print(f"\n=== {label} ===")
         try:
             raw = run_isolated(
@@ -613,6 +648,9 @@ def cmd_bench(args):
 
             if label == "sft":
                 baseline_correct[name] = per_problem
+                # Persisted so a resumed run can still compute CIs against the baseline
+                # without re-running it. Small: 30 problems x k booleans.
+                row["_per_problem"] = per_problem
             elif name in baseline_correct:
                 pt, lo, hi = paired_bootstrap(baseline_correct[name], per_problem, seed=args.seed)
                 row["delta_avg_vs_sft"] = pt
