@@ -144,6 +144,19 @@ if [ "${SMOKE:-0}" = "1" ]; then
     echo "=== SMOKE MODE: $TOTAL_STEPS steps, batch $TRAIN_BATCH_SIZE, $MAX_RESP_LENGTH tokens ==="
 fi
 
+# vLLM refuses to start when max_num_batched_tokens < max_model_len under chunked
+# prefill, and a training micro-batch smaller than one full sequence cannot pack it
+# either. Both budgets therefore have a hard floor at MAX_MODEL_LEN. Applied after the
+# smoke block so it covers overrides too.
+if [ "$ACTOR_MAX_TOKEN_LEN" -lt "$MAX_MODEL_LEN" ]; then
+    echo "NOTE: raising ACTOR_MAX_TOKEN_LEN $ACTOR_MAX_TOKEN_LEN -> $MAX_MODEL_LEN (max_model_len floor)"
+    export ACTOR_MAX_TOKEN_LEN=$MAX_MODEL_LEN
+fi
+if [ "$TEACHER_MAX_TOKEN_LEN" -lt "$MAX_MODEL_LEN" ]; then
+    echo "NOTE: raising TEACHER_MAX_TOKEN_LEN $TEACHER_MAX_TOKEN_LEN -> $MAX_MODEL_LEN"
+    export TEACHER_MAX_TOKEN_LEN=$MAX_MODEL_LEN
+fi
+
 export PROJECT_PATH=checkpoint
 export EXPERIMENT_NAME=${SMOKE:+smoke_}stdopd_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_len${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-bs${TRAIN_BATCH_SIZE}-lr${LR}-clip${ADV_CLIP_RANGE}
 export CKPT_PATH=${PROJECT_PATH}/${EXPERIMENT_NAME}
