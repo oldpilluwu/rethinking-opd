@@ -67,6 +67,7 @@ def validate(config: dict[str, Any], smoke: bool) -> None:
                 "data.max_response_length": 4096,
                 "actor_rollout_ref.actor.ppo_mini_batch_size": 64,
                 "trainer.total_training_steps": 150,
+                "trainer.optimizer_save_steps": [50],
             }
         )
 
@@ -85,6 +86,8 @@ def validate(config: dict[str, Any], smoke: bool) -> None:
         errors.append("data.apply_chat_template_kwargs.enable_thinking must be false")
 
     if smoke:
+        if select(config, "trainer.optimizer_save_steps") != []:
+            errors.append("trainer.optimizer_save_steps: smoke checkpoints must be model-only")
         smoke_bounds = {
             "data.train_batch_size": 64,
             "data.max_response_length": 4096,

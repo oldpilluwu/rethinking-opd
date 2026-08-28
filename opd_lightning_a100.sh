@@ -120,10 +120,9 @@ export TEACHER_PARAM_OFFLOAD=${TEACHER_PARAM_OFFLOAD:-False}
 
 # --------------------------------------------------------------- checkpoints
 export SAVE_STEPS=${SAVE_STEPS:-"[1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]"}
-# Optimizer state marks the resume points. 25 is included because it is the natural
-# early-evaluation checkpoint: stopping before 50 would otherwise leave nothing to
-# restart from. ~13.8 GB each.
-export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[25,50,100,150]"}
+# Keep exactly one resumable checkpoint to limit disk usage. Every other saved
+# step contains model+extra only and can be evaluated but not resumed.
+export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[50]"}
 
 # ------------------------------------------------------------------ smoke mode
 # SMOKE=1 runs a few cheap steps to prove the pipeline before committing 5-6 hours.
@@ -142,7 +141,7 @@ if [ "${SMOKE:-0}" = "1" ]; then
     export MINI_BATCH_SIZE=$TRAIN_BATCH_SIZE
     export TOTAL_STEPS=${SMOKE_STEPS:-3}
     export SAVE_STEPS="[$TOTAL_STEPS]"
-    export OPTIMIZER_SAVE_STEPS="[$TOTAL_STEPS]"
+    export OPTIMIZER_SAVE_STEPS="[]"
     export ACTOR_MAX_TOKEN_LEN=${SMOKE_TOKEN_LEN:-4096}
     export TEACHER_MAX_TOKEN_LEN=$ACTOR_MAX_TOKEN_LEN
     echo "=== SMOKE MODE: $TOTAL_STEPS steps, batch $TRAIN_BATCH_SIZE, $MAX_RESP_LENGTH tokens ==="

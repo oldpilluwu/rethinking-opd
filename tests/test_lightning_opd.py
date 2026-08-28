@@ -96,11 +96,13 @@ def test_recipe_pins_paper_faithful_settings_and_thinking_default() -> None:
         "export LOG_PROB_TOP_K=0",
         "export ADV_CLIP_RANGE=10.0",
         "export TOTAL_STEPS=${TOTAL_STEPS:-150}",
+        'export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[50]"}',
         "reward_model.model.fsdp_config.param_offload=$TEACHER_PARAM_OFFLOAD",
     )
     for setting in required:
         assert setting in script
     assert "+data.apply_chat_template_kwargs.enable_thinking=False" in script
+    assert 'export OPTIMIZER_SAVE_STEPS="[]"' in script
 
 
 def test_official_prompt_normalization_is_lossless() -> None:
@@ -152,6 +154,7 @@ def test_resolved_config_validator_rejects_wrong_temperature() -> None:
         "trainer.nnodes": 1,
         "trainer.test_freq": -1,
         "trainer.total_training_steps": 150,
+        "trainer.optimizer_save_steps": [50],
     }
     for key, value in values.items():
         assign(key, value)
