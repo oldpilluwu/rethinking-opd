@@ -1,12 +1,12 @@
 #!/bin/bash
 # =============================================================================
-# Standard (sampled-token) On-Policy Distillation
-#   student : Qwen3-1.7B-SFT      teacher : Qwen3-4B (non-thinking)
+# Paper-faithful scaled Standard (sampled-token) On-Policy Distillation
+#   student : Qwen3-1.7B-SFT      teacher : Qwen3-4B
 #   hardware: 1 x A100 80GB       framework: this repo's verl 0.7.0.dev fork
 #
-# Recipe follows Lightning OPD (arXiv 2604.13010) Table 6 and their released config
-# for the OPD stage. Sole deliberate deviation: temperature 1.0 rather than 0.8, forced
-# by how this fork computes the student term of the reward (see TEMPERATURE below).
+# This matches the transferable OPD settings in Lightning-OPD Table 6 and the
+# released implementation. It is a scaled reproduction, not the paper's exact
+# Qwen3-4B-SFT/Qwen3-8B multi-GPU experiment.
 #
 # "Standard OPD" == LOG_PROB_TOP_K=0: the per-token reward is the negative
 # reverse KL on the *sampled* token, applied via policy gradient. Setting
@@ -16,10 +16,12 @@
 # A6000 48GB alternatives are marked  # [48GB]  throughout.
 # =============================================================================
 
+set -e
 set -x
+set -o pipefail
 
 # ---------------------------------------------------------------- environment
-ray stop --force
+ray stop --force || true
 export RAY_memory_usage_threshold=0.99
 export PYTHONUNBUFFERED=1
 export TORCH_NCCL_BLOCKING_WAIT=1
@@ -55,9 +57,9 @@ export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
 # --------------------------------------------------------------------- data
-# Lightning OPD uses DAPO-Math-17k for the math domain. 150 steps x 64 prompts
-# consumes 9,600 of 17,917 rows, so shuffle must be ON or you would only ever
-# see the first half of the file in write order.
+# Lightning OPD uses DAPO-Math-17k for math. This artifact deterministically
+# keeps the 17,389 official prompts that fit the 1,024-token non-thinking bound.
+# 150 steps x 64 prompts consumes 9,600 prompt draws, so shuffle stays on.
 export TRAIN_DATASET=datasets/dapo-math-17k.parquet
 export TRAIN_DATASET_NAME=DAPO-Math-17k
 export TEST_DATA_DIR=datasets/test_data
@@ -75,19 +77,9 @@ export TRAIN_BATCH_SIZE=64                 # 64 prompts x n=4 = 256 sequences = 
 export MINI_BATCH_SIZE=64                  # == train batch -> exactly one update per rollout, strictly on-policy
 export N_RESPONSES=4
 
-# DELIBERATE DEVIATION FROM LIGHTNING TABLE 6 (which specifies 0.8).
-# This fork computes the student term of the reward from temperature-scaled logits
-# (dp_actor.py: logits_rmpad.div_(temperature)), while the teacher is scaled by the
-# separate teacher_temperature. At T != 1.0 the reward therefore compares a SHARPENED
-# student against an unsharpened teacher, which is not the reverse KL it claims to be.
-# Measured on synthetic logits at T=0.8: bias +0.24 nats (~82% of the intended signal)
-# and ~25% of tokens get their advantage sign flipped.
-# T=1.0 makes div_(1.0) a no-op, so both sides sit at temperature 1.0 and the reward is
-# exactly teacher_logp - student_logp. It is also the value the Rethinking-OPD paper
-# (Table 2) used with this same 1.7B/4B pair.
-# To use 0.8 faithfully you would need the reward to read T=1.0 student log-probs while
-# the importance ratio keeps the scaled ones -- a code change, not a config change.
-export TEMPERATURE=1.0
+# Lightning Table 6 and the released implementation use T=0.8 for rollout and
+# student log-probabilities. Teacher log-probabilities remain at T=1.0.
+export TEMPERATURE=0.8
 export TOP_P=1.0
 export TEACHER_TEMPERATURE=1.0
 
@@ -102,13 +94,13 @@ export TEACHER_TEMPERATURE=1.0
 export LR=${LR:-2e-6}
 export WEIGHT_DECAY=0.1
 export ADAM_BETAS="[0.9,0.98]"
-export TOTAL_STEPS=${TOTAL_STEPS:-100}
+export TOTAL_STEPS=${TOTAL_STEPS:-150}
 
 export LOG_PROB_TOP_K=0                    # 0 = standard / sampled-token OPD
 export DIAGNOSTIC_TOP_K=16                 # logging only; does not enter the loss
 export TOP_K_STRATEGY=only_stu
 export REWARD_WEIGHT_MODE=student_p
-export LOSS_AGG_MODE=token-mean
+export LOSS_AGG_MODE=seq-mean-token-mean       # equal weight per sampled response
 export MODEL_DTYPE=fp32                    # actor MASTER weights. FSDP already computes in
                                            # bf16; bf16 masters would underflow at these lrs.
 
@@ -127,11 +119,11 @@ export OPTIMIZER_OFFLOAD=False             # [48GB] True if OOM
 export TEACHER_PARAM_OFFLOAD=${TEACHER_PARAM_OFFLOAD:-False}
 
 # --------------------------------------------------------------- checkpoints
-export SAVE_STEPS=${SAVE_STEPS:-"[1,2,3,4,5,10,15,20,25,30,50,75,100]"}
+export SAVE_STEPS=${SAVE_STEPS:-"[1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]"}
 # Optimizer state marks the resume points. 25 is included because it is the natural
 # early-evaluation checkpoint: stopping before 50 would otherwise leave nothing to
 # restart from. ~13.8 GB each.
-export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[25,50,100]"}
+export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[25,50,100,150]"}
 
 # ------------------------------------------------------------------ smoke mode
 # SMOKE=1 runs a few cheap steps to prove the pipeline before committing 5-6 hours.
@@ -175,7 +167,7 @@ export CKPT_PATH=${PROJECT_PATH}/${EXPERIMENT_NAME}
 export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 
 # ------------------------------------------------------------------- resume
-# Only global_step_50 and global_step_150 carry optimizer state. resume_mode=auto
+# Only steps listed in OPTIMIZER_SAVE_STEPS carry optimizer state. resume_mode=auto
 # would follow the tracker file to whichever step was written last -- usually a
 # model-only checkpoint -- and fail on the missing optimizer shard. Always name
 # the path explicitly.
@@ -208,14 +200,19 @@ elif [ -d "$CKPT_PATH" ] && [ -n "$(ls -A "$CKPT_PATH" 2>/dev/null)" ]; then
     echo "FORCE_DIRTY_CKPT=1 set -- continuing into a non-empty directory."
 fi
 
+# Fail before allocating the GPU if the data is not the exact official split or
+# if the active actor tokenizer would cause verl to filter any prompt silently.
+python3 scripts/data/prepare_lightning_dapo.py validate \
+    --input "$TRAIN_DATASET" \
+    --tokenizer "$ACTOR_MODEL_PATH" \
+    --max-prompt-length "$MAX_PROMPT_LENGTH"
+
 mkdir -p logs
 LOG_FILE="logs/opd_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "log: $LOG_FILE"
 
-ray start --head
-sleep 5
-
+run_verl() {
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.adv_clip_range=$ADV_CLIP_RANGE \
@@ -279,6 +276,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.model.input_tokenizer=null \
     reward_model.model.use_remove_padding=True \
     +reward_model.model.dtype=bf16 \
+    reward_model.model.fsdp_config.param_offload=$TEACHER_PARAM_OFFLOAD \
     reward_model.micro_batch_size_per_gpu=1 \
     custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
     custom_reward_function.name=reward_func \
@@ -299,7 +297,28 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=False \
     trainer.opd_text_diagnostics=True \
-    $RESUME_ARGS
+    $RESUME_ARGS \
+    "$@"
+}
+
+# Resolve and validate the exact Hydra job before starting Ray or allocating the GPU.
+# CONFIG_ONLY=1 is useful for inspecting this artifact without launching training.
+RESOLVED_CONFIG="${LOG_FILE%.log}_resolved.yaml"
+run_verl --cfg job --resolve > "$RESOLVED_CONFIG"
+CONFIG_VALIDATION_ARGS=()
+if [ "${SMOKE:-0}" = "1" ]; then
+    CONFIG_VALIDATION_ARGS+=(--smoke)
+fi
+python3 scripts/diag/validate_lightning_opd_config.py \
+    "$RESOLVED_CONFIG" "${CONFIG_VALIDATION_ARGS[@]}"
+if [ "${CONFIG_ONLY:-0}" = "1" ]; then
+    echo "resolved config: $RESOLVED_CONFIG"
+    exit 0
+fi
+
+ray start --head
+sleep 5
+run_verl
 
 # ---------------------------------------------------------------------------
 # NOTES
@@ -314,11 +333,6 @@ python3 -m verl.trainer.main_ppo \
 #   reward_model.micro_batch_size_per_gpu is never consulted. There is no critic
 #   in this run; the key is set purely to bound the teacher's logits tensor.
 #   At 32768 tokens x 151,936 vocab that tensor is ~10GB on its own.
-#
-# reward_model.model.fsdp_config.param_offload
-#   Dead config. RewardModelWorker hard-codes CPUOffload(offload_params=True), so
-#   the teacher always streams params from CPU. On 80GB this is pure overhead --
-#   removing that line in fsdp_workers.py is worth ~30-60 min over the run.
 #
 # validation
 #   verl 0.7.0 under-reports accuracy by 5-7 points, hence test_freq=-1.

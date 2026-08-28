@@ -30,6 +30,7 @@ from omegaconf import DictConfig
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
+from verl.trainer.ppo.opd_utils import clip_and_mask_token_rewards, sequence_mean_token_mean
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
@@ -880,10 +881,7 @@ def compute_token_reward_direct_advantage(
         # produces a large negative outlier that can dominate the gradient for the step.
         # Lightning OPD (arXiv 2604.13010, Table 6) clips to [-10, 10].
         clip_range = getattr(config, "adv_clip_range", 0.0) if config is not None else 0.0
-        if clip_range and clip_range > 0:
-            token_level_rewards = torch.clamp(token_level_rewards, min=-clip_range, max=clip_range)
-
-        advantages = token_level_rewards * response_mask
+        advantages = clip_and_mask_token_rewards(token_level_rewards, response_mask, clip_range)
         returns = advantages.clone()
 
     return advantages, returns
@@ -970,10 +968,7 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
         loss = verl_F.masked_mean(seq_losses, seq_mask)  # seq-mean
     elif loss_agg_mode == "seq-mean-token-mean":
-        seq_mask = torch.sum(loss_mask, dim=-1)  # per-sequence token count
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_mask + 1e-8)  # token-mean
-        seq_mask = (seq_mask > 0).float()  # exclude fully masked sequences
-        loss = verl_F.masked_mean(seq_losses, seq_mask)  # seq-mean
+        loss = sequence_mean_token_mean(loss_mat, loss_mask)
     elif loss_agg_mode == "seq-mean-token-sum-norm":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
         loss = torch.sum(seq_losses) / loss_mask.shape[-1]  # The divisor

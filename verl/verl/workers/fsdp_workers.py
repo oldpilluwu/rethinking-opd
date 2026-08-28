@@ -49,6 +49,7 @@ from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
+from verl.trainer.ppo.opd_utils import compute_sampled_token_opd_reward, resolve_opd_top_k
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -984,7 +985,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         #   log_prob_top_k (not this value), so the algorithm is unchanged.
         _loss_top_k = self.config.rollout.get("log_prob_top_k", 0)
         _diag_top_k = self.config.rollout.get("diagnostic_top_k", 0)
-        data.meta_info["top_k"] = _loss_top_k if _loss_top_k > 0 else _diag_top_k
+        _, _forward_top_k = resolve_opd_top_k(_loss_top_k, _diag_top_k)
+        data.meta_info["top_k"] = _forward_top_k
         # data.meta_info["top_p"] = 1.0
         # print("log_prob_top_k", data.meta_info["top_k"])
         # perform recompute log_prob
@@ -2642,7 +2644,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             # running sampled-token OPD; diag_top_k > 0 makes the teacher additionally emit
             # top-k ids/logprobs and overlap masks for logging, without touching the reward.
             diag_top_k = data.meta_info.get("diagnostic_top_k", self.config.get("diagnostic_top_k", 0))
-            effective_top_k = top_k if top_k > 0 else diag_top_k
+            top_k, effective_top_k = resolve_opd_top_k(top_k, diag_top_k)
             
             output_logp = []
             output_on_student_logp = []
@@ -2749,8 +2751,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             else:
                 # Sampled-token ("standard") OPD: the per-token reward is the negative
                 # reverse KL on the sampled token. This is unchanged by diag_top_k.
-                reverse_kl = student_logp - teacher_logp
-                rm_scores = -reverse_kl
+                rm_scores = compute_sampled_token_opd_reward(student_logp, teacher_logp)
 
                 if diag_top_k > 0:
                     # Diagnostics-only: keep the overlap tensors the teacher just computed so
