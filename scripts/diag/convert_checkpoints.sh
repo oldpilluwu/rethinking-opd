@@ -11,8 +11,11 @@
 # model_merger.py.
 set -euo pipefail
 
-CKPT_DIR=${1:?usage: convert_checkpoints.sh <ckpt_dir> [out_dir]}
+CKPT_DIR=${1:?usage: convert_checkpoints.sh <ckpt_dir> [out_dir] [steps]}
 OUT_DIR=${2:-hf_ckpts}
+# Optional comma-separated step filter, e.g. "25,50". Converting a checkpoint costs
+# ~2 min and ~3.4GB, so there is no reason to convert ones you will not benchmark.
+STEPS=${3:-}
 MERGER=verl/scripts/legacy_model_merger.py
 
 mkdir -p "$OUT_DIR"
@@ -20,6 +23,10 @@ mkdir -p "$OUT_DIR"
 for step_dir in "$CKPT_DIR"/global_step_*; do
     [ -d "$step_dir/actor" ] || continue
     step=$(basename "$step_dir")
+    if [ -n "$STEPS" ]; then
+        n=${step#global_step_}
+        case ",$STEPS," in *",$n,"*) ;; *) continue ;; esac
+    fi
     target="$OUT_DIR/$step"
 
     if [ -f "$target/config.json" ]; then
