@@ -524,7 +524,69 @@ def _bench_one_model(model_path, benches, k, temperature, top_p, max_tokens, gpu
                 else 0.0
             ),
         }
+    # vLLM v1 runs its engine in a grandchild process (EngineCore). Letting this worker
+    # exit without shutting it down orphans that process, which keeps ~70GB of GPU memory
+    # and starves the next model ("Free memory on device (9.83/79.27 GiB)"). Process
+    # isolation alone does not cover it -- the grandchild outlives the child.
+    try:
+        llm.llm_engine.engine_core.shutdown()
+    except Exception:
+        pass
+    try:
+        del llm
+    except Exception:
+        pass
+    import gc as _gc
+
+    _gc.collect()
     return out
+
+
+def _gpu_free_gb():
+    """Free GPU memory in GiB via nvidia-smi, or None if it cannot be read."""
+    import subprocess
+
+    try:
+        o = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            text=True, timeout=20,
+        )
+        return int(o.strip().splitlines()[0]) / 1024.0
+    except Exception:
+        return None
+
+
+def wait_for_gpu(need_gb, timeout=180, reap=True):
+    """Block until at least need_gb is free, reaping orphaned vLLM engines if needed.
+
+    Between models the card must be genuinely empty. An orphaned EngineCore holds its
+    whole allocation, so without this the next model dies on startup and every model
+    after it inherits the same problem.
+    """
+    import subprocess
+    import time as _t
+
+    t0 = _t.time()
+    killed = False
+    while _t.time() - t0 < timeout:
+        free = _gpu_free_gb()
+        if free is None or free >= need_gb:
+            return free
+        if reap and not killed and _t.time() - t0 > 20:
+            # Orphans only: parented to init, so nothing we still depend on.
+            try:
+                out = subprocess.check_output(["ps", "-eo", "pid,ppid,args"], text=True, timeout=20)
+                for line in out.splitlines():
+                    if "EngineCore" in line or "VLLM::" in line:
+                        parts = line.split(None, 2)
+                        if len(parts) == 3 and parts[1] == "1":
+                            print(f"  reaping orphaned engine pid {parts[0]}")
+                            subprocess.run(["kill", "-9", parts[0]], timeout=10)
+                killed = True
+            except Exception as e:
+                print(f"  could not reap: {e}")
+        _t.sleep(5)
+    return _gpu_free_gb()
 
 
 def cmd_bench(args):
@@ -604,6 +666,15 @@ def cmd_bench(args):
             print('=== ' + label + ' === (already done, skipping)')
             continue
         print(f"\n=== {label} ===")
+        # Do not start until the card is actually free. vLLM sizes its KV cache from
+        # free memory at startup, so a leftover allocation does not merely slow the
+        # next model down -- it kills it outright, and every model after it.
+        _need = args.gpu_mem_util * 79.0 * 0.95
+        _free = wait_for_gpu(_need)
+        if _free is not None:
+            print(f'  gpu free: {_free:.1f} GiB (need ~{_need:.1f})')
+            if _free < _need:
+                print('  WARNING: starting anyway; engine init may fail')
         try:
             raw = run_isolated(
                 _bench_one_model,
