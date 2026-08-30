@@ -61,7 +61,7 @@ cd /home/ubuntu/rethinking-opd
 CONFIG=configs/opd/paper_qwen3_1p7b_rl_math_teacher_a100_step50.toml
 
 tmux new-session -d -s opd50 \
-  "cd /home/ubuntu/rethinking-opd && source .venv/bin/activate && bash opd_lightning_a100.sh $CONFIG; exec bash"
+  "bash -lc 'cd /home/ubuntu/rethinking-opd && source .venv/bin/activate && bash opd_lightning_a100.sh $CONFIG'"
 
 tmux attach -t opd50
 ```
@@ -74,6 +74,10 @@ cd /home/ubuntu/rethinking-opd
 source .venv/bin/activate
 python scripts/diag/watch_run.py --follow --total-steps 50
 ```
+
+The `opd50` tmux session exits when training succeeds or fails; the log and
+diagnostic files remain available. Use `tmux has-session -t opd50` to test
+whether it is still running and `tmux capture-pane -pt opd50` while it exists.
 
 The config records all scalar metrics on every step. At steps
 1–5, 10, 15, 20, 30, 40, and 50 it saves the model checkpoint, full decoded
