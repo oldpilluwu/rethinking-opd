@@ -183,6 +183,11 @@ def prepare_hf_model(model: Path | str, merge_root: Path, label: str) -> str:
 def _worker_generate(payload: dict[str, Any]) -> list[dict[str, Any]]:
     gpu = payload["gpu"]
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu
+    # FlashInfer's sampler is JIT-compiled with nvcc, which the torch/vLLM wheels
+    # do not ship, so engine startup dies in the profile run without a CUDA
+    # toolkit. opd_lightning_a100.sh disables it for training; evaluation has to
+    # match, both to start at all and to sample through the same code path.
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
     import torch
     from vllm import LLM, SamplingParams
