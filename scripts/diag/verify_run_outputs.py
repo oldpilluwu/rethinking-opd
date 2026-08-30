@@ -17,6 +17,17 @@ from scripts.config.load_opd_config import load_config  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--through-step",
+        type=int,
+        default=None,
+        help=(
+            "Verify a run that was deliberately stopped before the configured "
+            "final step. Everything the config asks for at or below this step is "
+            "still checked in full; later steps are reported as not attempted "
+            "rather than silently ignored."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -26,8 +37,20 @@ def main() -> None:
     experiment = config["experiment"]["name"]
     checkpoint_root = Path(config["experiment"]["output_dir"]) / experiment
     diagnostic_root = Path(config["experiment"]["diagnostics_dir"]) / experiment
-    save_steps = config["checkpoints"]["save_steps"]
+    configured_save_steps = config["checkpoints"]["save_steps"]
+    configured_total = config["training"]["steps"]
     optimizer_steps = set(config["checkpoints"]["optimizer_save_steps"])
+
+    through_step = args.through_step if args.through_step is not None else configured_total
+    if through_step < 1:
+        raise SystemExit("--through-step must be at least 1")
+    save_steps = [step for step in configured_save_steps if step <= through_step]
+    if not save_steps:
+        raise SystemExit(
+            f"--through-step {through_step} precedes every configured save step "
+            f"{sorted(configured_save_steps)}"
+        )
+    optimizer_steps = {step for step in optimizer_steps if step <= through_step}
     errors: list[str] = []
 
     for step in save_steps:
@@ -66,13 +89,13 @@ def main() -> None:
             for line in metrics_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         }
-        missing_metric_steps = sorted(set(range(1, config["training"]["steps"] + 1)) - metric_steps)
+        missing_metric_steps = sorted(set(range(1, through_step + 1)) - metric_steps)
         if missing_metric_steps:
             errors.append(f"metrics JSONL is missing steps: {missing_metric_steps}")
 
     if config["tracking"]["dump_rollouts"]:
         expected_rows = config["training"]["train_batch_size"] * config["rollout"]["responses_per_prompt"]
-        for step in config["tracking"]["rollout_data_steps"]:
+        for step in [s for s in config["tracking"]["rollout_data_steps"] if s <= through_step]:
             rollout_path = diagnostic_root / "rollouts" / f"{step}.jsonl"
             if not rollout_path.is_file():
                 errors.append(f"missing rollout dump: {rollout_path}")
@@ -85,6 +108,13 @@ def main() -> None:
         raise SystemExit("run output verification failed:\n- " + "\n- ".join(errors))
     print(f"verified {len(save_steps)} checkpoints and diagnostics through step {expected_last}")
     print(f"optimizer/resume state exists only at steps {sorted(optimizer_steps)}")
+
+    not_attempted = [step for step in configured_save_steps if step > through_step]
+    if not_attempted:
+        print(
+            f"INCOMPLETE RUN: stopped at step {through_step} of {configured_total} configured "
+            f"steps; checkpoints not attempted: {not_attempted}"
+        )
 
 
 if __name__ == "__main__":
