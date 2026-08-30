@@ -1,0 +1,124 @@
+# Single-A100 scaled reproduction of Lightning-OPD's standard sampled-token recipe.
+schema_version = 1
+
+[experiment]
+name = "lightning_standard_qwen3_1p7b_sft_qwen3_4b_a100"
+project_name = "OPD-Lightning-Repro"
+output_dir = "checkpoint"
+log_dir = "logs"
+validation_dir = "validation_log"
+
+[models]
+student = "model/Qwen3-1.7B-SFT"
+teacher = "model/Qwen3-4B"
+enable_thinking = false
+model_dtype = "fp32"
+teacher_dtype = "bf16"
+gradient_checkpointing = true
+activation_offload = false
+
+[data]
+name = "DAPO-Math-17k"
+train_file = "datasets/dapo-math-17k.parquet"
+validation_files = ["datasets/test_data/AIME24/test.parquet"]
+shuffle = true
+seed = 42
+max_prompt_length = 1024
+max_response_length = 4096
+filter_overlong_prompts = true
+truncation = "error"
+preflight = "lightning_dapo"
+
+[rollout]
+engine = "vllm"
+responses_per_prompt = 4
+do_sample = true
+temperature = 0.8
+teacher_temperature = 1.0
+sampling_top_k = -1
+top_p = 1.0
+repetition_penalty = 1.0
+ignore_eos = false
+
+[objective]
+adv_estimator = "token_reward_direct"
+method = "sampled_token"
+top_k = 0
+diagnostic_top_k = 16
+top_k_strategy = "only_stu"
+reward_weight_mode = "student_p"
+advantage_clip = 10.0
+loss_aggregation = "seq-mean-token-mean"
+entropy_coefficient = 0.0
+use_kl_loss = false
+kl_loss_coefficient = 0.0
+kl_loss_type = "low_var_kl"
+use_kl_in_reward = false
+kl_reward_coefficient = 0.0
+grpo_outcome_weight = 0.0
+
+[optimizer]
+learning_rate = 2e-6
+scheduler = "constant"
+warmup_ratio = 0.0
+weight_decay = 0.1
+betas = [0.9, 0.98]
+epsilon = 1e-8
+gradient_clip = 1.0
+
+[training]
+steps = 150
+epochs = 1
+train_batch_size = 64
+mini_batch_size = 64
+ppo_epochs = 1
+shuffle_minibatches = false
+ppo_micro_batch_size_per_gpu = 1
+reward_micro_batch_size_per_gpu = 1
+
+[runtime]
+gpus_per_node = 1
+nodes = 1
+tensor_parallel_size = 1
+sequence_parallel_size = 1
+actor_max_tokens_per_gpu = 16384
+teacher_max_tokens_per_gpu = 16384
+gpu_memory_utilization = 0.25
+actor_param_offload = false
+optimizer_offload = false
+teacher_param_offload = false
+forward_prefetch = true
+
+[checkpoints]
+save_steps = [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 50, 75, 100, 125, 150]
+optimizer_save_steps = [50]
+
+[validation]
+before_training = false
+frequency = -1
+max_response_length = 4096
+responses_per_prompt = 1
+temperature = 0.0
+top_k = -1
+top_p = 1.0
+do_sample = false
+prompt_suffix = ' Please reason step by step, and put your final answer within \boxed{}.'
+grader = "verl_rule"
+seed = 0
+gpu_memory_utilization = 0.9
+model_dtype = "bfloat16"
+
+[reward]
+enable_format_reward = false
+custom_function_path = "verl/verl/utils/reward_score/ttrl_math/__init__.py"
+custom_function_name = "reward_func"
+
+[tracking]
+loggers = ["console", "swanlab"]
+swanlab_mode = "offline"
+is_plot = false
+opd_text_diagnostics = true
+
+[hydra]
+# Add unmanaged Hydra settings here as complete key=value strings.
+extra_overrides = []

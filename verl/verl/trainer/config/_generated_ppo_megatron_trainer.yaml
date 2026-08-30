@@ -176,6 +176,7 @@ actor_rollout_ref:
     name: ???
     mode: sync
     temperature: 1.0
+    seed: 0
     top_k: -1
     top_p: 1
     prompt_length: ${oc.select:data.max_prompt_length,512}

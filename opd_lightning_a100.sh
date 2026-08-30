@@ -1,339 +1,158 @@
 #!/bin/bash
 # =============================================================================
-# Paper-faithful scaled Standard (sampled-token) On-Policy Distillation
-#   student : Qwen3-1.7B-SFT      teacher : Qwen3-4B
-#   hardware: 1 x A100 80GB       framework: this repo's verl 0.7.0.dev fork
+# Config-driven OPD launcher for NVIDIA GPUs.
 #
-# This matches the transferable OPD settings in Lightning-OPD Table 6 and the
-# released implementation. It is a scaled reproduction, not the paper's exact
-# Qwen3-4B-SFT/Qwen3-8B multi-GPU experiment.
+# Usage:
+#   bash opd_lightning_a100.sh
+#   bash opd_lightning_a100.sh configs/opd/paper_qwen3_1p7b_rl_math_teacher_a100.toml
+#   CONFIG_ONLY=1 bash opd_lightning_a100.sh --config configs/opd/lightning_standard_a100.toml
 #
-# "Standard OPD" == LOG_PROB_TOP_K=0: the per-token reward is the negative
-# reverse KL on the *sampled* token, applied via policy gradient. Setting
-# LOG_PROB_TOP_K>0 would switch to top-k OPD, a different algorithm.
-# Diagnostics come from DIAGNOSTIC_TOP_K, which does not touch the reward.
-#
-# A6000 48GB alternatives are marked  # [48GB]  throughout.
+# Experiment hyperparameters live in versioned TOML files, not in this launcher.
+# Remaining command-line arguments are applied as final Hydra overrides and are
+# checked against the TOML for all managed settings before training starts.
 # =============================================================================
 
-set -e
-set -x
-set -o pipefail
+set -euo pipefail
+
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$ROOT_DIR"
+
+DEFAULT_CONFIG="configs/opd/lightning_standard_a100.toml"
+CONFIG_PATH=${OPD_CONFIG:-$DEFAULT_CONFIG}
+if [ "${1:-}" = "--config" ]; then
+    if [ "$#" -lt 2 ]; then
+        echo "ERROR: --config requires a TOML path" >&2
+        exit 2
+    fi
+    CONFIG_PATH=$2
+    shift 2
+elif [[ "${1:-}" == *.toml ]]; then
+    CONFIG_PATH=$1
+    shift
+fi
+
+CONFIG_LOADER="scripts/config/load_opd_config.py"
+python3 "$CONFIG_LOADER" validate "$CONFIG_PATH"
+
+while IFS= read -r -d '' entry; do
+    export "$entry"
+done < <(python3 "$CONFIG_LOADER" env0 "$CONFIG_PATH")
+
+HYDRA_ARGS=()
+while IFS= read -r -d '' entry; do
+    HYDRA_ARGS+=("$entry")
+done < <(python3 "$CONFIG_LOADER" hydra-args0 "$CONFIG_PATH")
 
 # ---------------------------------------------------------------- environment
-ray stop --force || true
 export RAY_memory_usage_threshold=0.99
 export PYTHONUNBUFFERED=1
+export PYTHONHASHSEED=$SEED
 export TORCH_NCCL_BLOCKING_WAIT=1
 export NCCL_TIMEOUT=7200
 export NCCL_DEBUG=WARN
 export TOKENIZERS_PARALLELISM=true
-# FlashInfer JIT-compiles sampling kernels and needs nvcc (CUDA toolkit, not just the
-# driver). vLLM's native sampler is equivalent and needs no compiler.
 export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
 export HYDRA_FULL_ERROR=1
-export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
-# NOTE: CUDA_LAUNCH_BLOCKING is deliberately NOT set. The upstream script sets it
-# to 1, which serializes every kernel launch and costs real throughput.
+export OUTLINES_CACHE_DIR=${OUTLINES_CACHE_DIR:-$HOME/.cache/outlines/$(python3 -c 'import uuid; print(uuid.uuid4())')}
+export SWANLAB_MODE=${SWANLAB_MODE:-$CONFIG_SWANLAB_MODE}
+export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-$PROJECT_PATH/swanlab_log}
 
-# --- SwanLab -------------------------------------------------------------------
-# Without SWANLAB_MODE set, swanlab prompts interactively for an API key on first use
-# and blocks the run. offline writes to SWANLAB_LOG_DIR and needs no account; view it
-# afterwards (or live, in another shell) with:
-#     swanlab watch checkpoint/swanlab_log
-# Use cloud instead if you have a key: SWANLAB_MODE=cloud SWANLAB_API_KEY=... bash ...
-export SWANLAB_MODE=${SWANLAB_MODE:-offline}
-export PROJECT_NAME='OPD-Lightning-Repro'
+# ------------------------------------------------------------------- preflight
+case "$DATA_PREFLIGHT" in
+    lightning_dapo)
+        python3 scripts/data/prepare_lightning_dapo.py validate \
+            --input "$TRAIN_DATASET" \
+            --tokenizer "$ACTOR_MODEL_PATH" \
+            --max-prompt-length "$MAX_PROMPT_LENGTH"
+        ;;
+    paper_dapo)
+        python3 scripts/data/validate_paper_dapo.py \
+            --input "$TRAIN_DATASET" \
+            --tokenizer "$ACTOR_MODEL_PATH" \
+            --max-prompt-length "$MAX_PROMPT_LENGTH"
+        ;;
+    exists)
+        if [ ! -f "$TRAIN_DATASET" ]; then
+            echo "ERROR: training dataset does not exist: $TRAIN_DATASET" >&2
+            exit 1
+        fi
+        ;;
+    none)
+        ;;
+    *)
+        echo "ERROR: unsupported data preflight mode: $DATA_PREFLIGHT" >&2
+        exit 1
+        ;;
+esac
 
-# Set BOTH of these before a resume, or the diagnostic curves split into two
-# disconnected traces at the resume boundary. Record the ID somewhere durable.
-# export SWANLAB_RESUME=must
-# export SWANLAB_RUN_ID="<paste-run-id-here-when-resuming>"
-
-# ------------------------------------------------------------------- models
-export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-model/Qwen3-1.7B-SFT}
-export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-model/Qwen3-4B}
-export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
-export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
-
-# --------------------------------------------------------------------- data
-# Lightning OPD uses DAPO-Math-17k for math. This artifact deterministically
-# keeps the 17,389 official prompts that fit the 1,024-token non-thinking bound.
-# 150 steps x 64 prompts consumes 9,600 prompt draws, so shuffle stays on.
-export TRAIN_DATASET=datasets/dapo-math-17k.parquet
-export TRAIN_DATASET_NAME=DAPO-Math-17k
-export TEST_DATA_DIR=datasets/test_data
-TEST_DATASET="['$TEST_DATA_DIR/AIME24/test.parquet']"   # unused; test_freq=-1
-
-# ---------------------------------------------------------------- recipe
-export ADV_ESTIMATOR=token_reward_direct   # do not change for OPD
-export ADV_CLIP_RANGE=10.0                 # Lightning Table 6: advantage clip [-10, 10]
-
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESP_LENGTH=4096                # Lightning Table 6
-export MAX_MODEL_LEN=$(( MAX_PROMPT_LENGTH + MAX_RESP_LENGTH + 1 ))
-
-export TRAIN_BATCH_SIZE=64                 # 64 prompts x n=4 = 256 sequences = Lightning's global batch
-export MINI_BATCH_SIZE=64                  # == train batch -> exactly one update per rollout, strictly on-policy
-export N_RESPONSES=4
-
-# Lightning Table 6 and the released implementation use T=0.8 for rollout and
-# student log-probabilities. Teacher log-probabilities remain at T=1.0.
-export TEMPERATURE=0.8
-export TOP_P=1.0
-export TEACHER_TEMPERATURE=1.0
-
-# Lightning Table 6 and their released config both specify 2e-6. An earlier run used
-# 1e-6 on the reasoning that a smaller student wants a smaller lr -- that is backwards:
-# smaller models conventionally take HIGHER learning rates, so 1.7B at 1e-6 against
-# their 4B/8B at 2e-6 was conservative twice over, and movement was correspondingly slow
-# (all alignment metrics inside noise after 10 steps).
-# The Rethinking paper does use 1e-6 with this exact 1.7B/4B pair -- but for top-k OPD,
-# whose gradient has far lower variance than the sampled-token objective run here.
-# Set LR=1e-6 to go back; the checkpoint directory is keyed on lr so runs never mix.
-export LR=${LR:-2e-6}
-export WEIGHT_DECAY=0.1
-export ADAM_BETAS="[0.9,0.98]"
-export TOTAL_STEPS=${TOTAL_STEPS:-150}
-
-export LOG_PROB_TOP_K=0                    # 0 = standard / sampled-token OPD
-export DIAGNOSTIC_TOP_K=16                 # logging only; does not enter the loss
-export TOP_K_STRATEGY=only_stu
-export REWARD_WEIGHT_MODE=student_p
-export LOSS_AGG_MODE=seq-mean-token-mean       # equal weight per sampled response
-export MODEL_DTYPE=fp32                    # actor MASTER weights. FSDP already computes in
-                                           # bf16; bf16 masters would underflow at these lrs.
-
-# ------------------------------------------------------- memory / throughput
-export N_GPUS=1
-export PARALLEL_SIZE=1
-export ACTOR_MAX_TOKEN_LEN=16384           # [48GB] 8192
-export TEACHER_MAX_TOKEN_LEN=16384         # [48GB] 8192  (see critic.* note below)
-export GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.25}  # [48GB] 0.5 (lowered to make room for a resident teacher)
-export PARAM_OFFLOAD=False                 # [48GB] True
-export OPTIMIZER_OFFLOAD=False             # [48GB] True if OOM
-# Teacher parameter placement. Offloading streams 8GB over PCIe every micro-batch and
-# made teacher scoring 58% of step time in the smoke run (~1k tok/s for a 4B forward).
-# Keeping it resident costs ~8GB and should be several times faster.
-# [48GB] set to True -- the teacher will not fit there alongside the fp32 actor.
-export TEACHER_PARAM_OFFLOAD=${TEACHER_PARAM_OFFLOAD:-False}
-
-# --------------------------------------------------------------- checkpoints
-export SAVE_STEPS=${SAVE_STEPS:-"[1,2,3,4,5,10,15,20,25,30,50,75,100,125,150]"}
-# Keep exactly one resumable checkpoint to limit disk usage. Every other saved
-# step contains model+extra only and can be evaluated but not resumed.
-export OPTIMIZER_SAVE_STEPS=${OPTIMIZER_SAVE_STEPS:-"[50]"}
-
-# ------------------------------------------------------------------ smoke mode
-# SMOKE=1 runs a few cheap steps to prove the pipeline before committing 5-6 hours.
-# Shrinks length/batch/steps and writes to its own checkpoint directory so it can
-# never collide with a real run. Everything else -- the objective, the reward path,
-# the diagnostics -- is identical, which is the point: a shape mismatch in the
-# diagnostics is fatal on the first batch, so this is where it surfaces.
-# Every value here can be overridden from the environment, so the same mode doubles as
-# a calibration run at the real response length:
-#     SMOKE=1 SMOKE_RESP=4096 SMOKE_BATCH=16 bash opd_lightning_a100.sh
-# which measures the true truncation rate and per-step timing without committing to 150.
-if [ "${SMOKE:-0}" = "1" ]; then
-    export MAX_RESP_LENGTH=${SMOKE_RESP:-1024}
-    export MAX_MODEL_LEN=$(( MAX_PROMPT_LENGTH + MAX_RESP_LENGTH + 1 ))
-    export TRAIN_BATCH_SIZE=${SMOKE_BATCH:-8}
-    export MINI_BATCH_SIZE=$TRAIN_BATCH_SIZE
-    export TOTAL_STEPS=${SMOKE_STEPS:-3}
-    export SAVE_STEPS="[$TOTAL_STEPS]"
-    export OPTIMIZER_SAVE_STEPS="[]"
-    export ACTOR_MAX_TOKEN_LEN=${SMOKE_TOKEN_LEN:-4096}
-    export TEACHER_MAX_TOKEN_LEN=$ACTOR_MAX_TOKEN_LEN
-    echo "=== SMOKE MODE: $TOTAL_STEPS steps, batch $TRAIN_BATCH_SIZE, $MAX_RESP_LENGTH tokens ==="
-fi
-
-# vLLM refuses to start when max_num_batched_tokens < max_model_len under chunked
-# prefill, and a training micro-batch smaller than one full sequence cannot pack it
-# either. Both budgets therefore have a hard floor at MAX_MODEL_LEN. Applied after the
-# smoke block so it covers overrides too.
-if [ "$ACTOR_MAX_TOKEN_LEN" -lt "$MAX_MODEL_LEN" ]; then
-    echo "NOTE: raising ACTOR_MAX_TOKEN_LEN $ACTOR_MAX_TOKEN_LEN -> $MAX_MODEL_LEN (max_model_len floor)"
-    export ACTOR_MAX_TOKEN_LEN=$MAX_MODEL_LEN
-fi
-if [ "$TEACHER_MAX_TOKEN_LEN" -lt "$MAX_MODEL_LEN" ]; then
-    echo "NOTE: raising TEACHER_MAX_TOKEN_LEN $TEACHER_MAX_TOKEN_LEN -> $MAX_MODEL_LEN"
-    export TEACHER_MAX_TOKEN_LEN=$MAX_MODEL_LEN
-fi
-
-export PROJECT_PATH=checkpoint
-export EXPERIMENT_NAME=${SMOKE:+smoke_}stdopd_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_len${MAX_RESP_LENGTH}-T${TEMPERATURE}-n${N_RESPONSES}-bs${TRAIN_BATCH_SIZE}-lr${LR}-clip${ADV_CLIP_RANGE}
-export CKPT_PATH=${PROJECT_PATH}/${EXPERIMENT_NAME}
-export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
-
-# ------------------------------------------------------------------- resume
-# Only steps listed in OPTIMIZER_SAVE_STEPS carry optimizer state. resume_mode=auto
-# would follow the tracker file to whichever step was written last -- usually a
-# model-only checkpoint -- and fail on the missing optimizer shard. Always name
-# the path explicitly.
-#
-#   RESUME_FROM=${CKPT_PATH}/global_step_50 bash opd_lightning_a100.sh
-#
-# Rollout sampling is not seeded in this fork, so a resumed run diverges from the
-# original after the resume point. Delete any checkpoints above the resume step
-# before restarting, or your benchmark set will mix two trajectories.
-RESUME_ARGS="trainer.resume_mode=disable"
+# --------------------------------------------------------------------- resume
+RESUME_ARGS=("trainer.resume_mode=disable")
 if [ -n "${RESUME_FROM:-}" ]; then
-    RESUME_ARGS="trainer.resume_mode=resume_path trainer.resume_from_path=$RESUME_FROM"
+    RESUME_ARGS=("trainer.resume_mode=resume_path" "trainer.resume_from_path=$RESUME_FROM")
     if [ ! -f "$RESUME_FROM/manifest.json" ]; then
-        echo "WARNING: no manifest.json in $RESUME_FROM (written by runs after this patch)."
+        echo "WARNING: no manifest.json in $RESUME_FROM"
     elif ! grep -q '"resumable": true' "$RESUME_FROM/manifest.json"; then
-        echo "ERROR: $RESUME_FROM is marked NOT resumable in its manifest."
-        echo "Only steps in OPTIMIZER_SAVE_STEPS carry optimizer state."
+        echo "ERROR: $RESUME_FROM is marked NOT resumable in its manifest." >&2
+        echo "Only steps in checkpoints.optimizer_save_steps carry optimizer state." >&2
         exit 1
     fi
-elif [ -d "$CKPT_PATH" ] && [ -n "$(ls -A "$CKPT_PATH" 2>/dev/null)" ]; then
-    # The checkpoint manager creates directories but never clears them. Writing a
-    # model-only step into a directory that already holds optim_*.pt from a previous
-    # run leaves a checkpoint that looks resumable and is not.
-    echo "ERROR: checkpoint directory is not empty:"
-    echo "  $CKPT_PATH"
-    echo
-    echo "Use a fresh directory, or set RESUME_FROM=<...>/global_step_50 to resume."
-    echo "To reuse this path anyway: FORCE_DIRTY_CKPT=1 bash $0"
-    [ "${FORCE_DIRTY_CKPT:-0}" = "1" ] || exit 1
-    echo "FORCE_DIRTY_CKPT=1 set -- continuing into a non-empty directory."
 fi
 
-# Fail before allocating the GPU if the data is not the exact official split or
-# if the active actor tokenizer would cause verl to filter any prompt silently.
-python3 scripts/data/prepare_lightning_dapo.py validate \
-    --input "$TRAIN_DATASET" \
-    --tokenizer "$ACTOR_MODEL_PATH" \
-    --max-prompt-length "$MAX_PROMPT_LENGTH"
-
-mkdir -p logs
-LOG_FILE="logs/opd_$(date +%Y%m%d_%H%M%S).log"
+# ----------------------------------------------------------------------- logs
+mkdir -p "$LOG_DIR"
+SAFE_EXPERIMENT_NAME=${EXPERIMENT_NAME//[^a-zA-Z0-9_.-]/_}
+LOG_FILE="$LOG_DIR/${SAFE_EXPERIMENT_NAME}_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
+set -x
+echo "experiment config: $OPD_CONFIG_PATH"
+echo "student: $ACTOR_MODEL_PATH"
+echo "teacher: $REWARD_MODEL_PATH"
 echo "log: $LOG_FILE"
 
 run_verl() {
-python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=$ADV_ESTIMATOR \
-    algorithm.adv_clip_range=$ADV_CLIP_RANGE \
-    data.train_files="$TRAIN_DATASET" \
-    data.val_files="$TEST_DATASET" \
-    data.shuffle=True \
-    data.train_batch_size=$TRAIN_BATCH_SIZE \
-    data.max_prompt_length=$MAX_PROMPT_LENGTH \
-    data.max_response_length=$MAX_RESP_LENGTH \
-    data.filter_overlong_prompts=True \
-    data.truncation='error' \
-    data.return_raw_chat=True \
-    +data.apply_chat_template_kwargs.enable_thinking=False \
-    actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.model.enable_activation_offload=False \
-    actor_rollout_ref.actor.optim.lr=$LR \
-    actor_rollout_ref.actor.optim.weight_decay=$WEIGHT_DECAY \
-    actor_rollout_ref.actor.optim.betas="$ADAM_BETAS" \
-    actor_rollout_ref.actor.optim.lr_scheduler_type=constant \
-    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
-    actor_rollout_ref.actor.optim.optimizer=AdamW \
-    actor_rollout_ref.actor.optim.optimizer_impl=torch.optim \
-    actor_rollout_ref.actor.optim.eps=1e-8 \
-    actor_rollout_ref.actor.optim.clip_grad=1.0 \
-    actor_rollout_ref.actor.ppo_epochs=1 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$ACTOR_MAX_TOKEN_LEN \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=$PARALLEL_SIZE \
-    actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.loss_agg_mode=$LOSS_AGG_MODE \
-    actor_rollout_ref.actor.fsdp_config.param_offload=$PARAM_OFFLOAD \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=$OPTIMIZER_OFFLOAD \
-    actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE \
-    actor_rollout_ref.actor.checkpoint.save_contents="['model','optimizer','extra']" \
-    actor_rollout_ref.actor.checkpoint.load_contents="['model','optimizer','extra']" \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.temperature=$TEMPERATURE \
-    actor_rollout_ref.rollout.top_p=$TOP_P \
-    actor_rollout_ref.rollout.n=$N_RESPONSES \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEM_UTIL \
-    actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$ACTOR_MAX_TOKEN_LEN \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$ACTOR_MAX_TOKEN_LEN \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.rollout.calculate_log_probs=True \
-    +actor_rollout_ref.rollout.log_prob_top_k=$LOG_PROB_TOP_K \
-    +actor_rollout_ref.rollout.diagnostic_top_k=$DIAGNOSTIC_TOP_K \
-    +actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
-    +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
-    +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
-    critic.ppo_max_token_len_per_gpu=$TEACHER_MAX_TOKEN_LEN \
-    reward_model.enable=True \
-    reward_model.model.path=$REWARD_MODEL_PATH \
-    reward_model.model.input_tokenizer=null \
-    reward_model.model.use_remove_padding=True \
-    +reward_model.model.dtype=bf16 \
-    reward_model.model.fsdp_config.param_offload=$TEACHER_PARAM_OFFLOAD \
-    reward_model.micro_batch_size_per_gpu=1 \
-    custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
-    custom_reward_function.name=reward_func \
-    trainer.logger=['console','swanlab'] \
-    trainer.project_name=$PROJECT_NAME \
-    trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.n_gpus_per_node=$N_GPUS \
-    trainer.nnodes=1 \
-    trainer.total_epochs=1 \
-    trainer.total_training_steps=$TOTAL_STEPS \
-    trainer.val_before_train=False \
-    trainer.test_freq=-1 \
-    trainer.save_freq=-1 \
-    trainer.save_steps="$SAVE_STEPS" \
-    trainer.optimizer_save_steps="$OPTIMIZER_SAVE_STEPS" \
-    trainer.max_actor_ckpt_to_keep=null \
-    trainer.del_local_ckpt_after_load=False \
-    trainer.default_local_dir="$CKPT_PATH" \
-    trainer.is_plot=False \
-    trainer.opd_text_diagnostics=True \
-    $RESUME_ARGS \
-    "$@"
+    python3 -m verl.trainer.main_ppo \
+        "${HYDRA_ARGS[@]}" \
+        "${RESUME_ARGS[@]}" \
+        "$@"
 }
 
-# Resolve and validate the exact Hydra job before starting Ray or allocating the GPU.
-# CONFIG_ONLY=1 is useful for inspecting this artifact without launching training.
+# Resolve and compare every managed value to the source TOML before Ray starts.
 RESOLVED_CONFIG="${LOG_FILE%.log}_resolved.yaml"
 run_verl --cfg job --resolve > "$RESOLVED_CONFIG"
-CONFIG_VALIDATION_ARGS=()
-if [ "${SMOKE:-0}" = "1" ]; then
-    CONFIG_VALIDATION_ARGS+=(--smoke)
-fi
-python3 scripts/diag/validate_lightning_opd_config.py \
-    "$RESOLVED_CONFIG" "${CONFIG_VALIDATION_ARGS[@]}"
+python3 scripts/diag/validate_opd_config.py "$RESOLVED_CONFIG" "$CONFIG_PATH"
+
 if [ "${CONFIG_ONLY:-0}" = "1" ]; then
     echo "resolved config: $RESOLVED_CONFIG"
     exit 0
 fi
 
+if [ -z "${RESUME_FROM:-}" ] && [ -d "$CKPT_PATH" ] && [ -n "$(ls -A "$CKPT_PATH" 2>/dev/null)" ]; then
+    echo "ERROR: checkpoint directory is not empty:" >&2
+    echo "  $CKPT_PATH" >&2
+    echo "Set RESUME_FROM=<checkpoint> or choose a new experiment.name." >&2
+    if [ "${FORCE_DIRTY_CKPT:-0}" != "1" ]; then
+        exit 1
+    fi
+    echo "FORCE_DIRTY_CKPT=1 set -- continuing into a non-empty directory."
+fi
+
+if [ -n "${RESUME_FROM:-}" ] && [ -f "$CKPT_PATH/experiment.toml" ] \
+    && ! cmp -s "$CONFIG_PATH" "$CKPT_PATH/experiment.toml"; then
+    echo "ERROR: resume config differs from $CKPT_PATH/experiment.toml" >&2
+    echo "Use the archived config, or set ALLOW_CONFIG_DRIFT=1 deliberately." >&2
+    if [ "${ALLOW_CONFIG_DRIFT:-0}" != "1" ]; then
+        exit 1
+    fi
+    echo "ALLOW_CONFIG_DRIFT=1 set -- archiving the new resume config."
+fi
+
+# Archive both human-authored and machine-resolved configs with the run.
+mkdir -p "$CKPT_PATH"
+cp "$CONFIG_PATH" "$CKPT_PATH/experiment.toml"
+python3 "$CONFIG_LOADER" show "$CONFIG_PATH" > "$CKPT_PATH/experiment.json"
+cp "$RESOLVED_CONFIG" "$CKPT_PATH/resolved_hydra.yaml"
+
+ray stop --force || true
 ray start --head
 sleep 5
 run_verl
-
-# ---------------------------------------------------------------------------
-# NOTES
-#
-# critic.ppo_max_token_len_per_gpu
-#   The teacher's forward budget resolves through
-#     reward_model.forward_max_token_len_per_gpu
-#       -> critic.forward_max_token_len_per_gpu
-#       -> critic.ppo_max_token_len_per_gpu   (default 32768)
-#   It does NOT inherit the actor's value, and because
-#   reward_model.use_dynamic_bsz resolves to the actor's (True),
-#   reward_model.micro_batch_size_per_gpu is never consulted. There is no critic
-#   in this run; the key is set purely to bound the teacher's logits tensor.
-#   At 32768 tokens x 151,936 vocab that tensor is ~10GB on its own.
-#
-# validation
-#   verl 0.7.0 under-reports accuracy by 5-7 points, hence test_freq=-1.
-#   Benchmark the checkpoints afterwards with scripts/val/eval/.
-# ---------------------------------------------------------------------------

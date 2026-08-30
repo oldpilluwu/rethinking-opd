@@ -614,7 +614,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. init trainer and rollout random states
         self.torch_random_states = get_torch_device().get_rng_state()
         gen_dp_rank = rollout_device_mesh["dp"].get_local_rank()
-        get_torch_device().manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
+        rollout_seed = self.config.rollout.get("seed", 0)
+        get_torch_device().manual_seed(gen_dp_rank + rollout_seed)  # same seed on all ranks in one TP group
         self.gen_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.torch_random_states)
 

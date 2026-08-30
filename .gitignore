@@ -10,6 +10,7 @@ checkpoint/
 hf_ckpts*/
 model/
 outputs/
+validation_log/
 
 # Artifacts retrieved from remote runs (logs, swanlab, manifests)
 opd_artifacts/
