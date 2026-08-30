@@ -594,10 +594,10 @@ def cmd_bench(args):
 
     Two presets, because one set of settings cannot serve both purposes:
 
-    --preset paper    AIME24/25 + AMC23, avg@16, T=0.7, top-p 0.95, 31744 max tokens.
-                      Comparable to the Rethinking-OPD numbers. The long allowance is
-                      what makes it comparable -- truncating at 8k silently caps the
-                      score and the comparison stops meaning anything.
+    --preset paper    AIME24/25, avg@16, T=0.7, top-p 0.95, 31744 max tokens.
+                      Uses the paper's sampling settings on the selected AIME suite.
+                      The long allowance matters: truncating at 8k silently caps the
+                      score and changes the protocol.
 
     --preset health   Training-style prompts at the OPD sampling settings (T=1.0,
                       top-p 1.0) and the training response limit. A bounded-length
@@ -862,8 +862,7 @@ def main():
     bn.add_argument(
         "--benchmarks",
         default="datasets/test_data/AIME24/test.parquet,"
-        "datasets/test_data/AIME25/test.parquet,"
-        "datasets/test_data/AMC23/test.parquet",
+        "datasets/test_data/AIME25/test.parquet",
     )
     bn.add_argument(
         "--steps",

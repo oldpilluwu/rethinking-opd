@@ -125,8 +125,8 @@ bash opd_lightning_a100.sh \
   configs/opd/paper_qwen3_1p7b_rl_math_teacher_a100.toml
 ```
 
-Evaluate the initial student and a raw saved checkpoint with the paper's
-AIME24/AIME25/AMC23 `avg@16` protocol. Raw verl checkpoints are merged to
+Evaluate the initial student and a raw saved checkpoint with the configured
+AIME24/AIME25 `avg@16` protocol. Raw verl checkpoints are merged to
 Hugging Face format automatically:
 
 ```bash

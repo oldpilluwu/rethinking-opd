@@ -122,7 +122,7 @@ Get-FileHash "$LOCAL_DEST\*-diagnostics.tar.gz" -Algorithm SHA256
 
 ## 6. Run the exact configured benchmark suite
 
-Evaluate the initial student and step 50 on AIME24, AIME25, and AMC23 using the
+Evaluate the initial student and step 50 on AIME24 and AIME25 using the
 paper config's `avg@16` settings:
 
 ```bash

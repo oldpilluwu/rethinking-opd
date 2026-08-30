@@ -50,7 +50,6 @@ MODEL_NAMES = ["../../model/Qwen3-4B"]
 TASKS = [
     {"name": "AIME24", "path": f"{DATA_DIR}/AIME24/test.parquet", "N": 16},
     {"name": "AIME25", "path": f"{DATA_DIR}/AIME25/test.parquet", "N": 16},
-    {"name": "AMC23", "path": f"{DATA_DIR}/AMC23/test.parquet", "N": 16},
 ]
 
 PROMPT_TEMPLATE = """{problem} Please reason step by step, and put your final answer within \\boxed{{}}."""

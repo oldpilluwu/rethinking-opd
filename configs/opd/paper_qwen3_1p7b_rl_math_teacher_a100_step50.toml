@@ -27,7 +27,6 @@ train_file = "datasets/dapo-math-17k-processed.parquet"
 validation_files = [
   "datasets/test_data/AIME24/test.parquet",
   "datasets/test_data/AIME25/test.parquet",
-  "datasets/test_data/AMC23/test.parquet",
 ]
 shuffle = false
 seed = 42

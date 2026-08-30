@@ -193,14 +193,13 @@ def test_paper_step50_config_changes_only_run_and_diagnostic_schedules() -> None
     assert expected["algorithm.adv_clip_range"] == 0.0
 
 
-def test_paper_evaluation_config_matches_reported_avg16_protocol() -> None:
+def test_paper_evaluation_config_uses_requested_aime_avg16_protocol() -> None:
     config = load_config(PAPER_CONFIG)
     settings = settings_from_config(config)
 
     assert config["data"]["validation_files"] == [
         "datasets/test_data/AIME24/test.parquet",
         "datasets/test_data/AIME25/test.parquet",
-        "datasets/test_data/AMC23/test.parquet",
     ]
     assert settings.responses_per_prompt == 16
     assert settings.temperature == 0.7
