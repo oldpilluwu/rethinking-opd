@@ -285,17 +285,20 @@ def generate_records(
         if chunk
     ]
 
-    if len(payloads) == 1:
-        records = _worker_generate(payloads[0])
-    else:
-        context = multiprocessing.get_context("spawn")
-        records = []
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=len(payloads), mp_context=context
-        ) as executor:
-            futures = [executor.submit(_worker_generate, payload) for payload in payloads]
-            for future in concurrent.futures.as_completed(futures):
-                records.extend(future.result())
+    # Always generate in a spawned subprocess, including the single-GPU case.
+    # vLLM v1 keeps the weights and KV cache in a separate EngineCore process,
+    # and tearing that down from the parent is not reliable enough to run a
+    # second engine afterwards: the next model then sees the previous one's
+    # memory still held and refuses to start. Letting the worker process exit
+    # makes the OS reclaim the device for the next (model, task) pair.
+    context = multiprocessing.get_context("spawn")
+    records = []
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=len(payloads), mp_context=context
+    ) as executor:
+        futures = [executor.submit(_worker_generate, payload) for payload in payloads]
+        for future in concurrent.futures.as_completed(futures):
+            records.extend(future.result())
     return sorted(records, key=lambda item: (item["example_id"], item["rollout_id"]))
 
 
