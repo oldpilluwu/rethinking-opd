@@ -398,6 +398,7 @@ def evaluate_model(
     overwrite: bool,
     generate_only: bool,
     grade_only: bool,
+    tasks: list[str] | None = None,
 ) -> dict[str, Any]:
     settings = settings_from_config(config)
     model_dir = output_root / label
@@ -426,7 +427,22 @@ def evaluate_model(
     task_summaries: dict[str, Any] = {}
     grader = None if generate_only else load_rule_grader()
 
-    for raw_task_path in config["data"]["validation_files"]:
+    requested = {name.strip().lower() for name in tasks} if tasks else None
+    selected = [
+        path
+        for path in config["data"]["validation_files"]
+        if requested is None or task_name(Path(path)).lower() in requested
+    ]
+    if requested is not None:
+        available = {task_name(Path(p)).lower() for p in config["data"]["validation_files"]}
+        unknown = sorted(requested - available)
+        if unknown:
+            raise SystemExit(
+                f"--task {unknown} not in the config's validation_files "
+                f"{sorted(available)}"
+            )
+
+    for raw_task_path in selected:
         task_path = Path(raw_task_path)
         samples = load_samples(task_path, settings.prompt_suffix)
         name = task_name(task_path)
@@ -488,6 +504,15 @@ def parse_args() -> argparse.Namespace:
         help="LABEL=PATH, PATH, or LABEL=hf://ORG/MODEL; repeat as needed",
     )
     parser.add_argument("--gpus", default="0", help="comma-separated physical GPU IDs")
+    parser.add_argument(
+        "--task",
+        action="append",
+        help=(
+            "restrict evaluation to these task names from the config's "
+            "validation_files (e.g. AIME24); repeat as needed. The config itself "
+            "is unchanged, so the recorded manifest still describes the full suite."
+        ),
+    )
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     mode = parser.add_mutually_exclusive_group()
@@ -522,6 +547,7 @@ def main() -> None:
             overwrite=args.overwrite,
             generate_only=args.generate_only,
             grade_only=args.grade_only,
+            tasks=args.task,
         )
 
 
