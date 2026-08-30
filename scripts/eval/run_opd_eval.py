@@ -229,8 +229,12 @@ def _worker_generate(payload: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
         records: list[dict[str, Any]] = []
-        for rollout_id in payload["rollout_ids"]:
-            outputs = llm.generate(prompts, sampling, use_tqdm=False)
+        total_rollouts = len(payload["rollout_ids"])
+        for index, rollout_id in enumerate(payload["rollout_ids"], start=1):
+            # Each generate call is long enough that without progress output a
+            # running evaluation is indistinguishable from a hung one.
+            print(f"rollout {index}/{total_rollouts} (id={rollout_id})", flush=True)
+            outputs = llm.generate(prompts, sampling, use_tqdm=True)
             if len(outputs) != len(payload["samples"]):
                 raise RuntimeError("vLLM returned an unexpected number of evaluation outputs")
             for sample, output in zip(payload["samples"], outputs):
