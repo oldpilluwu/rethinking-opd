@@ -17,8 +17,9 @@ values. Unmanaged Hydra options can be recorded in `hydra.extra_overrides`.
 
 ## Schema
 
-- `experiment`: stable run name, tracking project, checkpoints, logs, and
-  validation-output roots. Give each independent run a unique `name`.
+- `experiment`: stable run name, tracking project, checkpoints, logs,
+  diagnostics, and validation-output roots. Give each independent run a unique
+  `name`.
 - `models`: student and teacher paths, Qwen thinking-template mode, FSDP master
   dtype, teacher dtype, gradient checkpointing, and activation offload.
 - `data`: train/validation parquet paths, dataset order seed, shuffle, prompt
@@ -47,7 +48,10 @@ values. Unmanaged Hydra options can be recorded in `hydra.extra_overrides`.
 - `reward`: optional format reward and custom task reward function. With
   `token_reward_direct`, task reward is diagnostic unless its estimator/weight
   is explicitly changed.
-- `tracking`: logger backends, SwanLab mode, plotting, and OPD text diagnostics.
+- `tracking`: logger backends, SwanLab mode, explicit plot steps/frequency, OPD
+  text diagnostics, and scheduled full-rollout JSONL dumps. When the `file`
+  logger is enabled, every scalar event is flushed to
+  `diagnostics_dir/experiment_name/metrics.jsonl`.
 - `hydra.extra_overrides`: advanced settings not represented elsewhere. Each
   entry is a complete Hydra `key=value` string.
 
@@ -61,6 +65,17 @@ Every launched run archives these files in its checkpoint root:
 - `experiment.toml`: byte-for-byte source config;
 - `experiment.json`: canonical parsed config;
 - `resolved_hydra.yaml`: the final framework configuration actually launched.
+
+It also records static environment provenance, five-second GPU telemetry, Ray
+logs, SwanLab data, scalar JSONL, and configured rollout dumps under the
+experiment's diagnostics directory. Create a checkpoint-free transfer archive
+with:
+
+```bash
+python scripts/diag/package_run_artifacts.py \
+  --config configs/opd/paper_qwen3_1p7b_rl_math_teacher_a100_step50.toml \
+  --kind diagnostics
+```
 
 Resuming requires the TOML to match the archived source config. Set
 `ALLOW_CONFIG_DRIFT=1` only when intentionally changing a resumed experiment;

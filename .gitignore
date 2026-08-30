@@ -25,6 +25,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+verl/flash_attn-*.whl
 
 # Ray
 /tmp/ray/

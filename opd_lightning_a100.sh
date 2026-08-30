@@ -55,7 +55,7 @@ export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
 export HYDRA_FULL_ERROR=1
 export OUTLINES_CACHE_DIR=${OUTLINES_CACHE_DIR:-$HOME/.cache/outlines/$(python3 -c 'import uuid; print(uuid.uuid4())')}
 export SWANLAB_MODE=${SWANLAB_MODE:-$CONFIG_SWANLAB_MODE}
-export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-$PROJECT_PATH/swanlab_log}
+export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-$CONFIG_SWANLAB_LOG_DIR}
 
 # ------------------------------------------------------------------- preflight
 case "$DATA_PREFLIGHT" in
@@ -99,7 +99,8 @@ if [ -n "${RESUME_FROM:-}" ]; then
 fi
 
 # ----------------------------------------------------------------------- logs
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$DIAGNOSTICS_DIR" "$SWANLAB_LOG_DIR"
+mkdir -p "$(dirname "$VERL_FILE_LOGGER_PATH")"
 SAFE_EXPERIMENT_NAME=${EXPERIMENT_NAME//[^a-zA-Z0-9_.-]/_}
 LOG_FILE="$LOG_DIR/${SAFE_EXPERIMENT_NAME}_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -152,7 +153,36 @@ cp "$CONFIG_PATH" "$CKPT_PATH/experiment.toml"
 python3 "$CONFIG_LOADER" show "$CONFIG_PATH" > "$CKPT_PATH/experiment.json"
 cp "$RESOLVED_CONFIG" "$CKPT_PATH/resolved_hydra.yaml"
 
+# Static provenance plus 5-second GPU telemetry make OOMs, thermal throttling,
+# utilization gaps, and memory spikes inspectable after the instance is gone.
+python3 --version > "$DIAGNOSTICS_DIR/python-version.txt" 2>&1
+python3 -m pip freeze > "$DIAGNOSTICS_DIR/pip-freeze.txt"
+git rev-parse HEAD > "$DIAGNOSTICS_DIR/git-commit.txt"
+git status --short --branch > "$DIAGNOSTICS_DIR/git-status.txt"
+uname -a > "$DIAGNOSTICS_DIR/uname.txt"
+lscpu > "$DIAGNOSTICS_DIR/lscpu.txt"
+nvidia-smi -q > "$DIAGNOSTICS_DIR/nvidia-smi-q.txt"
+sha256sum "$TRAIN_DATASET" > "$DIAGNOSTICS_DIR/training-dataset.sha256"
+if [ -f model/paper-model-revisions.txt ]; then
+    cp model/paper-model-revisions.txt "$DIAGNOSTICS_DIR/model-revisions.txt"
+fi
+
+GPU_CSV="$DIAGNOSTICS_DIR/gpu-telemetry.csv"
+printf '%s\n' "timestamp,index,name,utilization_gpu_pct,memory_used_mib,memory_total_mib,temperature_c,power_draw_w,clocks_sm_mhz" > "$GPU_CSV"
+nvidia-smi \
+    --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm \
+    --format=csv,noheader,nounits -l 5 >> "$GPU_CSV" &
+GPU_MONITOR_PID=$!
+cleanup_gpu_monitor() {
+    if kill -0 "$GPU_MONITOR_PID" 2>/dev/null; then
+        kill "$GPU_MONITOR_PID" 2>/dev/null || true
+        wait "$GPU_MONITOR_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup_gpu_monitor EXIT
+
 ray stop --force || true
-ray start --head
+RAY_TEMP_DIR="$(cd "$DIAGNOSTICS_DIR" && pwd)/ray"
+ray start --head --temp-dir="$RAY_TEMP_DIR"
 sleep 5
 run_verl

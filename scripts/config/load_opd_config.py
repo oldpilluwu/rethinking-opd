@@ -24,7 +24,14 @@ LOSS_AGGREGATIONS = {
 }
 PREFLIGHT_MODES = {"lightning_dapo", "paper_dapo", "exists", "none"}
 SECTION_KEYS = {
-    "experiment": {"name", "project_name", "output_dir", "log_dir", "validation_dir"},
+    "experiment": {
+        "name",
+        "project_name",
+        "output_dir",
+        "log_dir",
+        "validation_dir",
+        "diagnostics_dir",
+    },
     "models": {
         "student",
         "teacher",
@@ -123,7 +130,16 @@ SECTION_KEYS = {
         "model_dtype",
     },
     "reward": {"enable_format_reward", "custom_function_path", "custom_function_name"},
-    "tracking": {"loggers", "swanlab_mode", "is_plot", "opd_text_diagnostics"},
+    "tracking": {
+        "loggers",
+        "swanlab_mode",
+        "is_plot",
+        "plot_steps",
+        "plot_frequency",
+        "opd_text_diagnostics",
+        "dump_rollouts",
+        "rollout_data_steps",
+    },
     "hydra": {"extra_overrides"},
 }
 
@@ -232,6 +248,7 @@ def validate_config(config: dict[str, Any]) -> None:
         "experiment.output_dir",
         "experiment.log_dir",
         "experiment.validation_dir",
+        "experiment.diagnostics_dir",
         "models.student",
         "models.teacher",
         "models.model_dtype",
@@ -274,6 +291,7 @@ def validate_config(config: dict[str, Any]) -> None:
         "validation.do_sample",
         "tracking.is_plot",
         "tracking.opd_text_diagnostics",
+        "tracking.dump_rollouts",
     )
     for field in boolean_fields:
         _require_type(config, field, bool)
@@ -310,6 +328,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("rollout.sampling_top_k and validation.top_k must be at least -1")
     _require_nonnegative_int(config, "objective.top_k")
     _require_nonnegative_int(config, "objective.diagnostic_top_k")
+    _require_nonnegative_int(config, "tracking.plot_frequency")
 
     nonnegative_number_fields = (
         "objective.advantage_clip",
@@ -373,6 +392,22 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("tracking.loggers must contain at least one logger")
     _require_list(config, "hydra.extra_overrides", str)
 
+    plot_steps = _require_list(config, "tracking.plot_steps", int)
+    rollout_data_steps = _require_list(config, "tracking.rollout_data_steps", int)
+    for field, steps in (
+        ("tracking.plot_steps", plot_steps),
+        ("tracking.rollout_data_steps", rollout_data_steps),
+    ):
+        if steps != sorted(set(steps)) or any(step <= 0 for step in steps):
+            raise ConfigError(f"{field} must be sorted, unique, and positive")
+        out_of_range = [step for step in steps if step > total_steps]
+        if out_of_range:
+            raise ConfigError(f"{field} contains steps above training.steps={total_steps}: {out_of_range}")
+    if _get(config, "tracking.dump_rollouts") and not rollout_data_steps:
+        raise ConfigError("tracking.dump_rollouts=true requires tracking.rollout_data_steps")
+    if not _get(config, "tracking.dump_rollouts") and rollout_data_steps:
+        raise ConfigError("tracking.rollout_data_steps must be empty when dump_rollouts=false")
+
     method = _require_choice(config, "objective.method", METHODS)
     top_k = _get(config, "objective.top_k")
     if method == "sampled_token" and top_k != 0:
@@ -424,6 +459,7 @@ def derived(config: dict[str, Any]) -> dict[str, Any]:
     teacher_token_budget = max(_get(config, "runtime.teacher_max_tokens_per_gpu"), max_model_len)
     output_dir = Path(_get(config, "experiment.output_dir"))
     experiment_name = _get(config, "experiment.name")
+    diagnostics_dir = Path(_get(config, "experiment.diagnostics_dir")) / experiment_name
     return {
         "max_model_len": max_model_len,
         "actor_token_budget": actor_token_budget,
@@ -439,6 +475,10 @@ def derived(config: dict[str, Any]) -> dict[str, Any]:
         "output_dir": str(output_dir),
         "swanlab_mode": _get(config, "tracking.swanlab_mode"),
         "seed": _get(config, "data.seed"),
+        "diagnostics_dir": str(diagnostics_dir),
+        "swanlab_log_dir": str(diagnostics_dir / "swanlab"),
+        "file_log_path": str(diagnostics_dir / "metrics.jsonl"),
+        "rollout_data_dir": str(diagnostics_dir / "rollouts"),
     }
 
 
@@ -555,7 +595,14 @@ def managed_hydra_values(config: dict[str, Any]) -> list[tuple[str, Any]]:
         ("trainer.del_local_ckpt_after_load", False),
         ("trainer.default_local_dir", d["checkpoint_dir"]),
         ("trainer.is_plot", _get(config, "tracking.is_plot")),
+        ("trainer.opd_plot_steps", _get(config, "tracking.plot_steps")),
+        ("trainer.opd_plot_frequency", _get(config, "tracking.plot_frequency")),
         ("trainer.opd_text_diagnostics", _get(config, "tracking.opd_text_diagnostics")),
+        (
+            "trainer.rollout_data_dir",
+            d["rollout_data_dir"] if _get(config, "tracking.dump_rollouts") else None,
+        ),
+        ("trainer.rollout_data_steps", _get(config, "tracking.rollout_data_steps")),
     ]
     return values
 
@@ -583,6 +630,9 @@ def shell_environment(config: dict[str, Any]) -> dict[str, str]:
         "PROJECT_PATH": d["output_dir"],
         "LOG_DIR": d["log_dir"],
         "CONFIG_SWANLAB_MODE": d["swanlab_mode"],
+        "CONFIG_SWANLAB_LOG_DIR": d["swanlab_log_dir"],
+        "VERL_FILE_LOGGER_PATH": d["file_log_path"],
+        "DIAGNOSTICS_DIR": d["diagnostics_dir"],
         "SEED": str(d["seed"]),
     }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from scripts.config.load_opd_config import (  # noqa: E402
 )
 from scripts.data.prepare_lightning_dapo import BOXED_INSTRUCTION, normalize_prompt  # noqa: E402
 from scripts.diag.validate_opd_config import validate as validate_resolved_config  # noqa: E402
+from scripts.diag.package_run_artifacts import benchmark_files, diagnostics_files  # noqa: E402
 from scripts.eval.run_opd_eval import (  # noqa: E402
     ensure_prompt_suffix,
     grade_records,
@@ -31,12 +33,18 @@ from scripts.eval.run_opd_eval import (  # noqa: E402
     settings_from_config,
     validate_generation_count,
 )
-
 OPD_UTILS_PATH = ROOT / "verl" / "verl" / "trainer" / "ppo" / "opd_utils.py"
 OPD_UTILS_SPEC = importlib.util.spec_from_file_location("lightning_opd_utils", OPD_UTILS_PATH)
 assert OPD_UTILS_SPEC and OPD_UTILS_SPEC.loader
 OPD_UTILS = importlib.util.module_from_spec(OPD_UTILS_SPEC)
 OPD_UTILS_SPEC.loader.exec_module(OPD_UTILS)
+
+TRACKING_PATH = ROOT / "verl" / "verl" / "utils" / "tracking.py"
+TRACKING_SPEC = importlib.util.spec_from_file_location("lightning_opd_tracking", TRACKING_PATH)
+assert TRACKING_SPEC and TRACKING_SPEC.loader
+TRACKING = importlib.util.module_from_spec(TRACKING_SPEC)
+TRACKING_SPEC.loader.exec_module(TRACKING)
+FileLogger = TRACKING.FileLogger
 
 clip_and_mask_token_rewards = OPD_UTILS.clip_and_mask_token_rewards
 compute_sampled_token_opd_reward = OPD_UTILS.compute_sampled_token_opd_reward
@@ -47,6 +55,7 @@ CONFIG_DIR = ROOT / "configs" / "opd"
 LIGHTNING_CONFIG = CONFIG_DIR / "lightning_standard_a100.toml"
 SMOKE_CONFIG = CONFIG_DIR / "lightning_standard_a100_smoke.toml"
 PAPER_CONFIG = CONFIG_DIR / "paper_qwen3_1p7b_rl_math_teacher_a100.toml"
+PAPER_STEP50_CONFIG = CONFIG_DIR / "paper_qwen3_1p7b_rl_math_teacher_a100_step50.toml"
 
 
 def test_sampled_token_reward_uses_student_t08_and_teacher_t1() -> None:
@@ -98,7 +107,7 @@ def test_diagnostic_top_k_does_not_select_top_k_reward() -> None:
     assert forward_top_k == 16
 
 
-@pytest.mark.parametrize("path", [LIGHTNING_CONFIG, SMOKE_CONFIG, PAPER_CONFIG])
+@pytest.mark.parametrize("path", [LIGHTNING_CONFIG, SMOKE_CONFIG, PAPER_CONFIG, PAPER_STEP50_CONFIG])
 def test_checked_in_experiment_configs_are_valid(path: Path) -> None:
     load_config(path)
 
@@ -160,6 +169,28 @@ def test_paper_config_reproduces_qwen_rl_teacher_experiment() -> None:
     assert expected["algorithm.adv_clip_range"] == 0.0
     assert expected["trainer.total_training_steps"] == 279
     assert expected["trainer.optimizer_save_steps"] == [50]
+
+
+def test_paper_step50_config_changes_only_run_and_diagnostic_schedules() -> None:
+    full = load_config(PAPER_CONFIG)
+    step50 = load_config(PAPER_STEP50_CONFIG)
+    ignored = {"experiment", "training", "checkpoints", "tracking", "_config_path"}
+
+    for section, value in full.items():
+        if section not in ignored:
+            assert step50[section] == value
+
+    expected = expected_hydra_values(step50)
+    schedule = [1, 2, 3, 4, 5, 10, 15, 20, 30, 40, 50]
+    assert expected["trainer.total_training_steps"] == 50
+    assert expected["trainer.save_steps"] == schedule
+    assert expected["trainer.optimizer_save_steps"] == [50]
+    assert expected["trainer.opd_plot_steps"] == schedule
+    assert expected["trainer.opd_plot_frequency"] == 0
+    assert expected["trainer.rollout_data_steps"] == schedule
+    assert Path(expected["trainer.rollout_data_dir"]).name == "rollouts"
+    assert step50["tracking"]["loggers"] == ["console", "file", "swanlab"]
+    assert expected["algorithm.adv_clip_range"] == 0.0
 
 
 def test_paper_evaluation_config_matches_reported_avg16_protocol() -> None:
@@ -259,6 +290,67 @@ def test_optimizer_checkpoint_must_also_be_a_save_step() -> None:
     invalid["checkpoints"]["optimizer_save_steps"] = [49]
     with pytest.raises(ConfigError, match="also appear"):
         validate_config(invalid)
+
+
+def test_rollout_dump_requires_an_explicit_schedule() -> None:
+    config = load_config(LIGHTNING_CONFIG)
+    config.pop("_config_path")
+    config["tracking"]["dump_rollouts"] = True
+    with pytest.raises(ConfigError, match="requires tracking.rollout_data_steps"):
+        validate_config(config)
+
+
+def test_transfer_artifact_selection_excludes_checkpoint_weights_and_merged_models(
+    tmp_path: Path,
+) -> None:
+    config = load_config(PAPER_STEP50_CONFIG)
+    config["experiment"]["diagnostics_dir"] = str(tmp_path / "diag")
+    config["experiment"]["log_dir"] = str(tmp_path / "logs")
+    config["experiment"]["output_dir"] = str(tmp_path / "checkpoint")
+    config["experiment"]["validation_dir"] = str(tmp_path / "validation")
+    experiment = config["experiment"]["name"]
+
+    diagnostic = tmp_path / "diag" / experiment / "metrics.jsonl"
+    diagnostic.parent.mkdir(parents=True)
+    diagnostic.write_text("{}\n", encoding="utf-8")
+    log = tmp_path / "logs" / f"{experiment}_20260101.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("training\n", encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint" / experiment
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "experiment.toml").write_text("config\n", encoding="utf-8")
+    actor = checkpoint / "global_step_50" / "actor"
+    actor.mkdir(parents=True)
+    (actor / "model_world_size_1_rank_0.pt").write_bytes(b"weights")
+
+    evaluation = tmp_path / "validation" / experiment
+    (evaluation / "step50").mkdir(parents=True)
+    (evaluation / "step50" / "summary.json").write_text("{}\n", encoding="utf-8")
+    merged = evaluation / "merged_models" / "step50"
+    merged.mkdir(parents=True)
+    (merged / "model.safetensors").write_bytes(b"weights")
+
+    diagnostic_names = {arcname.as_posix() for _, arcname in diagnostics_files(config)}
+    benchmark_names = {arcname.as_posix() for _, arcname in benchmark_files(config)}
+    assert "run_metadata/experiment.toml" in diagnostic_names
+    assert not any("global_step" in name or name.endswith(".pt") for name in diagnostic_names)
+    assert "benchmarks/step50/summary.json" in benchmark_names
+    assert not any("merged_models" in name or name.endswith(".safetensors") for name in benchmark_names)
+
+
+def test_file_logger_flushes_scalars_and_tolerates_plot_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "nested" / "metrics.jsonl"
+    monkeypatch.setenv("VERL_FILE_LOGGER_PATH", str(output))
+    logger = FileLogger("project", "experiment")
+    logger.log({"scalar": torch.tensor(2.5), "plot": object()}, step=1)
+
+    record = json.loads(output.read_text(encoding="utf-8"))
+    assert record["step"] == 1
+    assert record["data"]["scalar"] == 2.5
+    assert isinstance(record["data"]["plot"], str)
+    logger.finish()
 
 
 def test_hydra_arguments_are_generated_from_config() -> None:

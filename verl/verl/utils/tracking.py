@@ -236,11 +236,24 @@ class FileLogger:
             os.makedirs(directory, exist_ok=True)
             self.filepath = os.path.join(directory, f"{self.experiment_name}.jsonl")
             print(f"Creating file logger at {self.filepath}")
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
         self.fp = open(self.filepath, "w")
 
     def log(self, data, step):
         data = {"step": step, "data": data}
-        self.fp.write(json.dumps(data) + "\n")
+        self.fp.write(json.dumps(data, default=self._json_fallback) + "\n")
+        # Keep completed steps durable when a GPU/Ray failure terminates the run.
+        self.fp.flush()
+
+    @staticmethod
+    def _json_fallback(value):
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except (TypeError, ValueError):
+                pass
+        return str(value)
 
     def finish(self):
         self.fp.close()

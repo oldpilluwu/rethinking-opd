@@ -7,6 +7,7 @@ project_name = "OPD-Lightning-Repro"
 output_dir = "checkpoint"
 log_dir = "logs"
 validation_dir = "validation_log"
+diagnostics_dir = "diag_out"
 
 [models]
 student = "model/Qwen3-1.7B-SFT"
@@ -117,7 +118,11 @@ custom_function_name = "reward_func"
 loggers = ["console", "swanlab"]
 swanlab_mode = "offline"
 is_plot = false
+plot_steps = [1]
+plot_frequency = 10
 opd_text_diagnostics = true
+dump_rollouts = false
+rollout_data_steps = []
 
 [hydra]
 extra_overrides = []

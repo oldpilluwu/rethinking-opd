@@ -133,9 +133,9 @@ def main():
 
     path = args.log
     if not path:
-        hits = sorted(glob.glob("logs/opd_*.log"), key=os.path.getmtime)
+        hits = sorted(glob.glob("logs/*.log"), key=os.path.getmtime)
         if not hits:
-            raise SystemExit("no logs/opd_*.log found -- run from the repo root")
+            raise SystemExit("no logs/*.log found -- run from the repo root")
         path = hits[-1]
 
     while True:

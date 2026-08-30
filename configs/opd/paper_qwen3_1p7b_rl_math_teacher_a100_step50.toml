@@ -1,11 +1,11 @@
-# Single-A100 execution of the paper's Qwen3-1.7B (non-thinking) student and
-# Qwen3-4B-Non-Thinking-RL-Math teacher experiment. Algorithmic defaults follow
-# Appendix A.2 / Table 2. The one-GPU topology is a hardware adaptation of the
-# paper's 8 x A800 run; global batch and optimizer semantics are unchanged.
+# Diagnostic 50-step prefix of the paper's Qwen3-1.7B (non-thinking) student
+# and Qwen3-4B-Non-Thinking-RL-Math teacher experiment. Training settings are
+# identical to paper_qwen3_1p7b_rl_math_teacher_a100.toml except for the explicit
+# stopping/checkpoint/diagnostic schedules requested for this run.
 schema_version = 1
 
 [experiment]
-name = "paper_qwen3_1p7b_qwen3_4b_non_thinking_rl_math_topk16_a100"
+name = "paper_qwen3_1p7b_qwen3_4b_non_thinking_rl_math_topk16_a100_step50"
 project_name = "Rethinking-OPD"
 output_dir = "checkpoint"
 log_dir = "logs"
@@ -55,8 +55,7 @@ top_k = 16
 diagnostic_top_k = 0
 top_k_strategy = "only_stu"
 reward_weight_mode = "student_p"
-# The author's token_reward_direct implementation does not clip advantages.
-# Positive clipping is reserved for configs that explicitly request it.
+# The author's paper experiment does not clip the direct advantages.
 advantage_clip = 0.0
 loss_aggregation = "token-mean"
 entropy_coefficient = 0.0
@@ -77,9 +76,7 @@ epsilon = 1e-8
 gradient_clip = 1.0
 
 [training]
-# The paper artifact has 17,917 rows. Its Qwen3 non-thinking template leaves
-# 17,909 prompts within 1,024 tokens; drop_last=True gives 279 steps/epoch.
-steps = 279
+steps = 50
 epochs = 1
 train_batch_size = 64
 mini_batch_size = 64
@@ -102,12 +99,13 @@ teacher_param_offload = false
 forward_prefetch = true
 
 [checkpoints]
-save_steps = [20, 40, 50, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 279]
+# Steps 1-40 are model+extra only. Step 50 also has optimizer state and is the
+# only resumable checkpoint, avoiding optimizer-state duplication.
+save_steps = [1, 2, 3, 4, 5, 10, 15, 20, 30, 40, 50]
 optimizer_save_steps = [50]
 
 [validation]
-# Verl-side validation remains disabled because this fork under-reports accuracy.
-# These values record the paper's external evaluation sampling configuration.
+# Exact paper evaluation is run externally after training.
 before_training = false
 frequency = -1
 max_response_length = 31744
@@ -128,14 +126,17 @@ custom_function_path = "verl/verl/utils/reward_score/ttrl_math/__init__.py"
 custom_function_name = "reward_func"
 
 [tracking]
-loggers = ["console", "swanlab"]
+# metrics.jsonl records every scalar step independently of SwanLab. SwanLab
+# retains plots; full decoded rollout records are dumped at the diagnostic
+# checkpoints, with every one of the first five steps included.
+loggers = ["console", "file", "swanlab"]
 swanlab_mode = "offline"
 is_plot = true
-plot_steps = [1]
-plot_frequency = 10
+plot_steps = [1, 2, 3, 4, 5, 10, 15, 20, 30, 40, 50]
+plot_frequency = 0
 opd_text_diagnostics = true
-dump_rollouts = false
-rollout_data_steps = []
+dump_rollouts = true
+rollout_data_steps = [1, 2, 3, 4, 5, 10, 15, 20, 30, 40, 50]
 
 [hydra]
 extra_overrides = []

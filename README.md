@@ -105,6 +105,15 @@ The checked-in experiments are:
   DeepMath subset is the teacher's RL post-training data, not the OPD prompt
   set. This config preserves the paper's global batch and optimizer semantics
   on one A100, rather than its original 8-A800 topology.
+- `configs/opd/paper_qwen3_1p7b_rl_math_teacher_a100_step50.toml`: a diagnostic
+  50-step prefix of that paper experiment, with model saves and full rollout
+  dumps at steps 1–5, 10, 15, 20, 30, 40, and 50; only step 50 retains optimizer
+  state.
+
+For a new Ubuntu A100 instance, follow
+[`docs/a100_step50_runbook.md`](docs/a100_step50_runbook.md). It covers the
+non-Conda environment, immutable model downloads, tmux launch, diagnostics,
+paper evaluation, and checkpoint-free sync archives.
 
 For the paper experiment:
 

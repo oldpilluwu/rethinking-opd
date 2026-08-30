@@ -150,6 +150,10 @@ trainer:
   log_val_generations: 0
   is_plot: False
 
+  # OPD plot schedule. Explicit steps are combined with the optional frequency.
+  opd_plot_steps: [1]
+  opd_plot_frequency: 10
+
   # On-policy-distillation diagnostics. Only ever run when algorithm.adv_estimator is a
   # distillation estimator; under GRPO/PPO they are skipped regardless of this flag,
   # because rm_scores there is an outcome reward rather than a teacher/student log-ratio.
@@ -161,6 +165,10 @@ trainer:
 
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
+
+  # Only dump complete decoded rollout records on these steps. null/empty means
+  # every step when rollout_data_dir is set, preserving the upstream behavior.
+  rollout_data_steps: null
 
   # Directory for logging validation data; no dump if null
   validation_data_dir: null

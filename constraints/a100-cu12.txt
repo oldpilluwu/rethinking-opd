@@ -1,0 +1,11 @@
+# Compatible set for the repo's vLLM 0.11.0 / torch 2.8 CUDA 12 installer.
+# These pins also prevent the resolver conflicts seen with NumPy 1.26 plus
+# SciPy 1.18, OpenCV 5, CuPy 14, packaging 26, and fsspec 2026.7.
+numpy==1.26.4
+scipy==1.15.3
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+cupy-cuda12x==13.6.0
+packaging==25.0
+fsspec==2026.6.0
+transformers==4.57.1

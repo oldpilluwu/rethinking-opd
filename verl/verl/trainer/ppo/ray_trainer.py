@@ -1197,7 +1197,16 @@ class RayPPOTrainer:
                                     batch = batch.union(distillation_output)
                         
                         # Plot overlapping tokens for Reverse KL
-                        if (self.global_steps == 1 or self.global_steps % 10 == 0) and "student_valid_counts" in batch.batch.keys():
+                        _plot_steps = set(self.config.trainer.get("opd_plot_steps", [1]) or [])
+                        _plot_frequency = int(self.config.trainer.get("opd_plot_frequency", 0) or 0)
+                        _plot_this_step = self.global_steps in _plot_steps or (
+                            _plot_frequency > 0 and self.global_steps % _plot_frequency == 0
+                        )
+                        if (
+                            self.config.trainer.get("is_plot", False)
+                            and _plot_this_step
+                            and "student_valid_counts" in batch.batch.keys()
+                        ):
                             try:
                                 import matplotlib.pyplot as plt
                                 import swanlab
@@ -2179,7 +2188,12 @@ class RayPPOTrainer:
                                 import traceback
                                 traceback.print_exc()
                     
-                    if self.config.trainer.get("is_plot", False) and (self.global_steps == 1 or self.global_steps % 10 == 0):
+                    _plot_steps = set(self.config.trainer.get("opd_plot_steps", [1]) or [])
+                    _plot_frequency = int(self.config.trainer.get("opd_plot_frequency", 0) or 0)
+                    _plot_this_step = self.global_steps in _plot_steps or (
+                        _plot_frequency > 0 and self.global_steps % _plot_frequency == 0
+                    )
+                    if self.config.trainer.get("is_plot", False) and _plot_this_step:
                         try:
                             import matplotlib.pyplot as plt
                             import swanlab
@@ -2392,7 +2406,10 @@ class RayPPOTrainer:
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
+                    rollout_data_steps = self.config.trainer.get("rollout_data_steps", None)
+                    if rollout_data_dir and (
+                        not rollout_data_steps or self.global_steps in set(rollout_data_steps)
+                    ):
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
