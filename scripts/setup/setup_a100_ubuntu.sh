@@ -37,7 +37,10 @@ python -m pip install --upgrade pip setuptools wheel
 )
 
 python -m pip install --no-deps -e ./verl
-python -m pip install swanlab math-verify latex2sympy2-extended
+# matplotlib backs the SwanLab diagnostic plots. The trainer imports it inside a
+# try/except, so without it a run trains to completion but silently emits no
+# plots at any of the configured plot steps.
+python -m pip install swanlab math-verify latex2sympy2-extended matplotlib
 python -m pip check
 python scripts/setup/check_a100_env.py
 

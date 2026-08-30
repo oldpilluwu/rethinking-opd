@@ -36,6 +36,9 @@ MODULES = (
     "pandas",
     "swanlab",
     "math_verify",
+    # The trainer imports matplotlib inside a try/except when is_plot is set, so
+    # a missing install costs the diagnostic plots without failing the run.
+    "matplotlib",
 )
 
 
