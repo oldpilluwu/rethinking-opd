@@ -173,16 +173,33 @@ nvidia-smi \
     --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm \
     --format=csv,noheader,nounits -l 5 >> "$GPU_CSV" &
 GPU_MONITOR_PID=$!
-cleanup_gpu_monitor() {
+# Ray builds its plasma store socket as
+# <temp-dir>/session_<timestamp>_<pid>/sockets/plasma_store, and an AF_UNIX path
+# cannot exceed 107 bytes. Rooting the session under the diagnostics directory
+# overruns that limit for long experiment names, so the live session uses a
+# short /tmp path and its text logs are copied into the diagnostics tree.
+RAY_TEMP_DIR=$(mktemp -d /tmp/ray-opd-XXXXXX)
+RAY_LOG_DEST="$(cd "$DIAGNOSTICS_DIR" && pwd)/ray"
+
+collect_ray_logs() {
+    [ -d "$RAY_TEMP_DIR" ] || return 0
+    while IFS= read -r -d '' logdir; do
+        dest="$RAY_LOG_DEST/${logdir#./}"
+        mkdir -p "$dest"
+        cp -R "$RAY_TEMP_DIR/${logdir#./}/." "$dest/" 2>/dev/null || true
+    done < <(cd "$RAY_TEMP_DIR" && find . -type d -name logs -print0)
+}
+
+cleanup_run() {
     if kill -0 "$GPU_MONITOR_PID" 2>/dev/null; then
         kill "$GPU_MONITOR_PID" 2>/dev/null || true
         wait "$GPU_MONITOR_PID" 2>/dev/null || true
     fi
+    collect_ray_logs
 }
-trap cleanup_gpu_monitor EXIT
+trap cleanup_run EXIT
 
 ray stop --force || true
-RAY_TEMP_DIR="$(cd "$DIAGNOSTICS_DIR" && pwd)/ray"
 ray start --head --temp-dir="$RAY_TEMP_DIR"
 sleep 5
 run_verl
