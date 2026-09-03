@@ -109,6 +109,10 @@ The checked-in experiments are:
   50-step prefix of that paper experiment, with model saves and full rollout
   dumps at steps 1–5, 10, 15, 20, 30, 40, and 50; only step 50 retains optimizer
   state.
+- `configs/opd/paper_qwen3_1p7b_rl_math_teacher_2x5090.toml`: the same paper
+  experiment adapted to one host with two RTX 5090 32 GB cards. It keeps the
+  paper objective, global batch, and optimizer settings, uses data-parallel
+  rollout, and enables the offloads needed for the smaller per-card memory.
 
 For a new Ubuntu A100 instance, follow
 [`docs/a100_step50_runbook.md`](docs/a100_step50_runbook.md). It covers the
@@ -124,6 +128,24 @@ CONFIG_ONLY=1 bash opd_lightning_a100.sh \
 bash opd_lightning_a100.sh \
   configs/opd/paper_qwen3_1p7b_rl_math_teacher_a100.toml
 ```
+
+On a Linux host with two RTX 5090s, use the dedicated launcher. It selects
+devices `0,1` by default and checks for two SM120 cards, at least 30 GiB visible
+memory per card, BF16 support, and a PyTorch CUDA 12.8+ build before allocating
+the models:
+
+```bash
+CONFIG_ONLY=1 bash opd_2x5090.sh
+bash opd_2x5090.sh
+
+# Select a different pair when the host has more GPUs:
+CUDA_VISIBLE_DEVICES=2,3 bash opd_2x5090.sh
+```
+
+The RTX 5090 has no NVLink, so the checked-in profile keeps vLLM tensor
+parallelism at one and runs one rollout replica per GPU. If PCIe peer access is
+unavailable or unstable on the host, retry with `NCCL_P2P_DISABLE=1`; it is not
+forced because NCCL can use PCIe P2P on systems where the topology permits it.
 
 Evaluate the initial student and a raw saved checkpoint with the configured
 AIME24/AIME25 `avg@16` protocol. Raw verl checkpoints are merged to

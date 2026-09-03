@@ -33,6 +33,8 @@ from scripts.eval.run_opd_eval import (  # noqa: E402
     settings_from_config,
     validate_generation_count,
 )
+from scripts.setup.check_2x5090 import HardwareError, validate_hardware  # noqa: E402
+
 OPD_UTILS_PATH = ROOT / "verl" / "verl" / "trainer" / "ppo" / "opd_utils.py"
 OPD_UTILS_SPEC = importlib.util.spec_from_file_location("lightning_opd_utils", OPD_UTILS_PATH)
 assert OPD_UTILS_SPEC and OPD_UTILS_SPEC.loader
@@ -56,6 +58,7 @@ LIGHTNING_CONFIG = CONFIG_DIR / "lightning_standard_a100.toml"
 SMOKE_CONFIG = CONFIG_DIR / "lightning_standard_a100_smoke.toml"
 PAPER_CONFIG = CONFIG_DIR / "paper_qwen3_1p7b_rl_math_teacher_a100.toml"
 PAPER_STEP50_CONFIG = CONFIG_DIR / "paper_qwen3_1p7b_rl_math_teacher_a100_step50.toml"
+RTX_5090_CONFIG = CONFIG_DIR / "paper_qwen3_1p7b_rl_math_teacher_2x5090.toml"
 
 
 def test_sampled_token_reward_uses_student_t08_and_teacher_t1() -> None:
@@ -107,7 +110,16 @@ def test_diagnostic_top_k_does_not_select_top_k_reward() -> None:
     assert forward_top_k == 16
 
 
-@pytest.mark.parametrize("path", [LIGHTNING_CONFIG, SMOKE_CONFIG, PAPER_CONFIG, PAPER_STEP50_CONFIG])
+@pytest.mark.parametrize(
+    "path",
+    [
+        LIGHTNING_CONFIG,
+        SMOKE_CONFIG,
+        PAPER_CONFIG,
+        PAPER_STEP50_CONFIG,
+        RTX_5090_CONFIG,
+    ],
+)
 def test_checked_in_experiment_configs_are_valid(path: Path) -> None:
     load_config(path)
 
@@ -191,6 +203,52 @@ def test_paper_step50_config_changes_only_run_and_diagnostic_schedules() -> None
     assert Path(expected["trainer.rollout_data_dir"]).name == "rollouts"
     assert step50["tracking"]["loggers"] == ["console", "file", "swanlab"]
     assert expected["algorithm.adv_clip_range"] == 0.0
+
+
+def test_2x5090_config_preserves_paper_recipe_with_memory_safe_topology() -> None:
+    paper = load_config(PAPER_CONFIG)
+    rtx = load_config(RTX_5090_CONFIG)
+
+    for section in (
+        "data",
+        "rollout",
+        "objective",
+        "optimizer",
+        "training",
+        "checkpoints",
+        "validation",
+    ):
+        assert rtx[section] == paper[section]
+
+    expected = expected_hydra_values(rtx)
+    assert expected["trainer.n_gpus_per_node"] == 2
+    assert expected["trainer.nnodes"] == 1
+    assert expected["actor_rollout_ref.rollout.tensor_model_parallel_size"] == 1
+    assert expected["actor_rollout_ref.rollout.gpu_memory_utilization"] == 0.20
+    assert expected["actor_rollout_ref.actor.ppo_max_token_len_per_gpu"] == 8193
+    assert expected["critic.ppo_max_token_len_per_gpu"] == 8193
+    assert expected["actor_rollout_ref.actor.fsdp_config.model_dtype"] == "fp32"
+    assert expected["reward_model.model.dtype"] == "bf16"
+    assert expected["actor_rollout_ref.actor.fsdp_config.optimizer_offload"] is True
+    assert expected["reward_model.model.fsdp_config.param_offload"] is True
+    assert rtx["models"]["activation_offload"] is True
+
+
+def test_2x5090_hardware_preflight_accepts_sm120_cuda_12p8() -> None:
+    gpus = [
+        {"name": "NVIDIA GeForce RTX 5090", "memory_gib": 31.8, "capability": (12, 0)},
+        {"name": "NVIDIA GeForce RTX 5090", "memory_gib": 31.8, "capability": (12, 0)},
+    ]
+    validate_hardware(gpus, torch_cuda="12.8", bf16_supported=True)
+
+
+def test_2x5090_hardware_preflight_rejects_incompatible_cuda_build() -> None:
+    gpus = [
+        {"name": "NVIDIA GeForce RTX 5090", "memory_gib": 31.8, "capability": (12, 0)},
+        {"name": "NVIDIA GeForce RTX 5090", "memory_gib": 31.8, "capability": (12, 0)},
+    ]
+    with pytest.raises(HardwareError, match="CUDA 12.8"):
+        validate_hardware(gpus, torch_cuda="12.6", bf16_supported=True)
 
 
 def test_paper_evaluation_config_uses_requested_aime_avg16_protocol() -> None:

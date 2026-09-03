@@ -1,8 +1,9 @@
 # OPD experiment configs
 
-Each TOML file is a complete experiment specification for
-`opd_lightning_a100.sh`. Start by copying the closest checked-in config; do not
-edit the launcher.
+Each TOML file is a complete experiment specification for the config-driven
+OPD launcher. Start by copying the closest checked-in config; do not edit the
+launcher. Use `opd_lightning_a100.sh` for the A100 profiles and
+`opd_2x5090.sh` for a two-RTX-5090 profile with hardware validation.
 
 ```bash
 cp configs/opd/lightning_standard_a100.toml configs/opd/my_experiment.toml
@@ -10,6 +11,19 @@ $EDITOR configs/opd/my_experiment.toml
 CONFIG_ONLY=1 bash opd_lightning_a100.sh configs/opd/my_experiment.toml
 bash opd_lightning_a100.sh configs/opd/my_experiment.toml
 ```
+
+The 5090 launcher accepts a custom two-GPU config in the same way:
+
+```bash
+CONFIG_ONLY=1 bash opd_2x5090.sh configs/opd/my_2gpu_experiment.toml
+bash opd_2x5090.sh configs/opd/my_2gpu_experiment.toml
+```
+
+It requires `runtime.nodes=1` and `runtime.gpus_per_node=2`. Unless
+`CUDA_VISIBLE_DEVICES` is already set, it exposes devices `0,1`. The hardware
+preflight is intentionally skipped by `CONFIG_ONLY=1`, so configs can be
+resolved without RTX 5090s (the launcher's normal model/data preflight still
+requires the configured experiment assets).
 
 `CONFIG_ONLY=1` resolves Hydra and compares every managed value against the
 TOML. Training is rejected if a command-line override changes one of those
